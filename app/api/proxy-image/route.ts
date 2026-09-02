@@ -63,12 +63,15 @@ export async function GET(req: NextRequest) {
         headers['Referer'] = parsedUrl.origin + '/';
       } else if (cleanUrl.includes('twimg.com') || cleanUrl.includes('x.com')) {
         headers['Referer'] = 'https://x.com/';
+      } else if (cleanUrl.includes('pinterest.com') || cleanUrl.includes('pinimg.com')) {
+        headers['Referer'] = 'https://www.pinterest.com/';
       }
     }
 
     let res = await fetch(cleanUrl, {
       headers,
-      redirect: 'follow'
+      redirect: 'follow',
+      next: { revalidate: 3600 }
     });
 
     let contentType = res.headers.get('content-type') || '';
