@@ -1,5 +1,3 @@
-import { PDFDocument } from 'pdf-lib';
-import jsPDF from 'jspdf';
 import { Tracker } from '@/types';
 
 // Fetch and parse image into raw bytes for PDF embedding
@@ -85,6 +83,7 @@ export async function exportWithPdfLib(tracker: Tracker, customImages?: string[]
     throw new Error('No images to export');
   }
 
+  const { PDFDocument } = await import('pdf-lib');
   const pdfDoc = await PDFDocument.create();
 
   for (const imgUrl of imagesToExport) {
@@ -147,7 +146,8 @@ export async function exportWithImg2Pdf(tracker: Tracker, customImages?: string[
     throw new Error('No images to export');
   }
 
-  let doc: jsPDF | null = null;
+  const { default: jsPDF } = await import('jspdf');
+  let doc: InstanceType<typeof jsPDF> | null = null;
 
   for (let i = 0; i < imagesToExport.length; i++) {
     const imgUrl = imagesToExport[i];

@@ -1,5 +1,3 @@
-import JSZip from 'jszip';
-
 export interface ImageExportOptions {
   images: string[];
   title?: string;
@@ -141,6 +139,7 @@ export async function exportImagesPackage(options: ImageExportOptions): Promise<
     throw new Error('No images to export');
   }
 
+  const { default: JSZip } = await import('jszip');
   const zip = new JSZip();
   const total = images.length;
   let completed = 0;
