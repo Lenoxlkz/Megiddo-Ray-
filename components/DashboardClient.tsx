@@ -46,6 +46,7 @@ import { v4 as uuidv4 } from 'uuid';
 import Image from 'next/image';
 import { useI18n } from '@/components/I18nProvider';
 import { TerminalTitle } from '@/components/TerminalTitle';
+import { LanguageCapsule } from '@/components/LanguageCapsule';
 import { exportWithPdfLib, exportWithImg2Pdf } from '@/lib/pdfExporter';
 import { exportImagesPackage, downloadSingleImage } from '@/lib/imageExporter';
 import { exportVideo, exportAudioMp3 } from '@/lib/videoExporter';
@@ -267,7 +268,7 @@ export default function DashboardClient() {
     try {
       if (typeof navigator !== 'undefined' && navigator.clipboard) {
         await navigator.clipboard.writeText(text);
-        showToast(`${label} copiado al portapapeles`);
+        showToast(`${label} ${t('copiedToClipboard')}`);
       }
     } catch (err) {
       console.warn('Copy error:', err);
@@ -346,7 +347,7 @@ export default function DashboardClient() {
       ...prev,
       [tracker.id]: newSel
     }));
-    showToast(`Seleccionados los primeros ${limit} capítulos`);
+    showToast(`${t('selectedFirstN')} ${limit} ${t('chapters')}`);
   };
 
   const selectLastNChapters = (tracker: Tracker, count: number) => {
@@ -365,7 +366,7 @@ export default function DashboardClient() {
       ...prev,
       [tracker.id]: newSel
     }));
-    showToast(`Seleccionados los últimos ${selectedCount} capítulos`);
+    showToast(`${t('selectedLastN')} ${selectedCount} ${t('chapters')}`);
   };
 
   const selectAllInTracker = (tracker: Tracker) => {
@@ -378,7 +379,7 @@ export default function DashboardClient() {
       ...prev,
       [tracker.id]: newSel
     }));
-    showToast(`Todos los capítulos seleccionados (${tracker.chapters.length})`);
+    showToast(`${t('selectAll')} (${tracker.chapters.length})`);
   };
 
   const deselectAllInTracker = (tracker: Tracker) => {
@@ -386,7 +387,7 @@ export default function DashboardClient() {
       ...prev,
       [tracker.id]: {}
     }));
-    showToast('Selección desmarcada');
+    showToast(t('deselectAll'));
   };
 
   const invertSelectionInTracker = (tracker: Tracker) => {
@@ -402,7 +403,7 @@ export default function DashboardClient() {
         [tracker.id]: newSel
       };
     });
-    showToast('Selección invertida');
+    showToast(t('invertSelection'));
   };
 
   // Toggle Slow Server / Wait Mode on a tracker
@@ -410,7 +411,7 @@ export default function DashboardClient() {
     setTrackers(prev => prev.map(item => {
       if (item.id === trackerId) {
         const nextVal = !(item.slowServerMode ?? true);
-        showToast(nextVal ? 'Modo Espera (Servidor Lento) ACTIVADO' : 'Modo Espera DESACTIVADO');
+        showToast(nextVal ? `${t('smartWaitMode')}: ON` : `${t('smartWaitMode')}: OFF`);
         return {
           ...item,
           slowServerMode: nextVal
@@ -2661,10 +2662,10 @@ export default function DashboardClient() {
                                                 </div>
                                                 <div className="space-y-1 max-w-md">
                                                   <p className="text-xs font-medium text-white">
-                                                    {chapter.errorMsg || 'El servidor tardó en responder al solicitar este capítulo'}
+                                                    {chapter.errorMsg || t('serverSlowResponse')}
                                                   </p>
                                                   <p className="text-[11px] text-neutral-400">
-                                                    Puedes reintentarlo ahora usando el Modo Espera que hace pausas inteligentes y evita bloqueos.
+                                                    {t('retryWithWaitModeHint')}
                                                   </p>
                                                 </div>
                                                 <button
@@ -2673,7 +2674,7 @@ export default function DashboardClient() {
                                                   className="mt-2 flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-amber-500 hover:bg-amber-400 text-black shadow-lg transition-all cursor-pointer"
                                                 >
                                                   <RotateCw className="w-3.5 h-3.5" />
-                                                  <span>Reintentar Capítulo (Modo Espera)</span>
+                                                  <span>{t('retryChapterWaitMode')}</span>
                                                 </button>
                                               </div>
                                             )}
@@ -2696,7 +2697,12 @@ export default function DashboardClient() {
           </AnimatePresence>
         </div>
 
+        {/* Dedicated Space at bottom for floating Language Capsule */}
+        <div className="h-16 sm:h-20" aria-hidden="true" />
       </div>
+
+      {/* Fixed Floating Water Ripple Language Capsule */}
+      <LanguageCapsule />
 
       {/* New Task Modal - Responsive with Vertical Scroll */}
       <AnimatePresence>
@@ -2729,7 +2735,7 @@ export default function DashboardClient() {
                       {t('createNewTask')}
                     </h2>
                     <p className="text-[11px] sm:text-xs text-neutral-400 hidden sm:block">
-                      Ingresa el enlace y configura el modo de descarga
+                      {t('createTaskSubtitle')}
                     </p>
                   </div>
                 </div>
@@ -3011,13 +3017,13 @@ export default function DashboardClient() {
                       </div>
                       <div>
                         <div className="text-xs font-semibold text-white flex items-center gap-2">
-                          <span>Modo Espera Inteligente (Recomendado)</span>
+                          <span>{t('smartWaitMode')}</span>
                           <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                            Anticaídas
+                            {t('antiCrash')}
                           </span>
                         </div>
                         <div className="text-[11px] text-neutral-400">
-                          Evita que los capítulos queden rotos cuando servidores como Olympus tardan en responder.
+                          {t('smartWaitModeDesc')}
                         </div>
                       </div>
                     </div>

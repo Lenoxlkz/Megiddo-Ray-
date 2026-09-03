@@ -2,12 +2,12 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useSyncExternalStore } from 'react';
 
-type Language = 'en' | 'es';
+export type Language = 'en' | 'es';
 
-const translations = {
+export const translations = {
   en: {
     appTitle: 'Liquid Fast Download',
-    tagline: 'Advanced search and data extraction engine.',
+    tagline: 'Advanced search, streaming media and sequential data extraction engine.',
     enterUrl: 'Enter URL to track...',
     modeSingle: 'Single Chapter',
     modeSequential: 'Sequential Chapters',
@@ -22,7 +22,7 @@ const translations = {
     paused: 'Paused',
     idle: 'Idle',
     stopped: 'Stopped',
-    imagesFound: 'Images Found',
+    imagesFound: 'Images / Frames',
     images: 'Images',
     exportPdf: 'Export PDF',
     exportPdfPdfLib: 'PDF (pdf-lib)',
@@ -43,7 +43,10 @@ const translations = {
     controls: 'Controls',
     newTask: 'New Task',
     createNewTask: 'Create New Task',
+    createTaskSubtitle: 'Enter the link and configure the extraction & download mode',
     mangaUrl: 'Target URL',
+    videoUrlLabel: 'Video URL',
+    imageUrlLabel: 'Image / Gallery URL',
     trackingMode: 'Tracking Mode',
     trackAllSimultaneously: 'Track all chapters simultaneously',
     trackAllOneAfterAnother: 'Track all chapters one after another',
@@ -55,16 +58,16 @@ const translations = {
     resume: 'Resume',
     stop: 'Stop',
     delete: 'Delete',
-    pageNumber: 'Page',
+    pageNumber: 'Page / Frame',
     selectPdfEngine: 'Choose export engine',
     calculating: 'Calculating...',
-    chapters: 'Chapters',
+    chapters: 'Chapters / Items',
     discoveringChapters: 'Discovering chapters...',
     chapter: 'Chapter',
     downloadingBatch: 'Downloading in parallel...',
     exportAllPdf: 'Export All (PDF)',
     exportChapter: 'Export PDF',
-    pages: 'pages',
+    pages: 'items',
     collapse: 'Collapse',
     expand: 'Expand',
     expandAll: 'Expand All',
@@ -114,6 +117,27 @@ const translations = {
     nsfwVideoParallel: 'Batch Image Extraction',
     videoPlayer: 'Video Player',
     authorBy: 'by',
+    author: 'Author',
+    link: 'Link',
+    copiedToClipboard: 'copied to clipboard',
+    selectedFirstN: 'Selected the first',
+    selectedLastN: 'Selected the last',
+    smartWaitMode: 'Smart Wait Mode (Recommended)',
+    antiCrash: 'Anti-Crash',
+    smartWaitModeDesc: 'Prevents broken chapters when manga and media servers take time to respond.',
+    serverSlowResponse: 'The server took too long to respond when requesting this chapter.',
+    retryWithWaitModeHint: 'You can retry now using Smart Wait Mode with automated rate limiting and pauses.',
+    retryChapterWaitMode: 'Retry Chapter (Wait Mode)',
+    copyAuthor: 'Copy author name',
+    copyUrl: 'Copy URL',
+    
+    // Language capsule & switcher
+    languageCapsuleTitle: 'Language',
+    spanish: 'Spanish',
+    english: 'English',
+    currentLanguage: 'Current Language: English',
+    switchLanguage: 'Switch to Spanish',
+    languageSwitchedNotification: 'Switched to English',
     
     // Image Category Export
     exportImageZip: 'ZIP Package',
@@ -139,7 +163,7 @@ const translations = {
   },
   es: {
     appTitle: 'Liquid Fast Download',
-    tagline: 'Motor avanzado de búsqueda y extracción de datos.',
+    tagline: 'Motor avanzado de búsqueda, medios continuos y extracción secuencial de datos.',
     enterUrl: 'Introduce la URL a rastrear...',
     modeSingle: 'Capítulo Único',
     modeSequential: 'Capítulos Secuenciales',
@@ -175,7 +199,10 @@ const translations = {
     controls: 'Controles',
     newTask: 'Nueva Tarea',
     createNewTask: 'Crear Nueva Tarea',
+    createTaskSubtitle: 'Ingresa el enlace y configura el modo de extracción y descarga',
     mangaUrl: 'URL Objetivo',
+    videoUrlLabel: 'URL del Video',
+    imageUrlLabel: 'URL de la Imagen / Galería',
     trackingMode: 'Modo de Rastreo',
     trackAllSimultaneously: 'Rastrear todos los capítulos simultáneamente',
     trackAllOneAfterAnother: 'Rastrear todos los capítulos uno tras otro',
@@ -246,6 +273,27 @@ const translations = {
     nsfwVideoParallel: 'Extracción de Imágenes en Lote',
     videoPlayer: 'Reproductor de Video',
     authorBy: 'por',
+    author: 'Autor',
+    link: 'Enlace',
+    copiedToClipboard: 'copiado al portapapeles',
+    selectedFirstN: 'Seleccionados los primeros',
+    selectedLastN: 'Seleccionados los últimos',
+    smartWaitMode: 'Modo Espera Inteligente (Recomendado)',
+    antiCrash: 'Anticaídas',
+    smartWaitModeDesc: 'Evita que los capítulos queden rotos cuando servidores de manga y medios tardan en responder.',
+    serverSlowResponse: 'El servidor tardó en responder al solicitar este capítulo.',
+    retryWithWaitModeHint: 'Puedes reintentarlo ahora usando el Modo Espera que hace pausas inteligentes y evita bloqueos.',
+    retryChapterWaitMode: 'Reintentar Capítulo (Modo Espera)',
+    copyAuthor: 'Copiar nombre del autor',
+    copyUrl: 'Copiar URL',
+
+    // Cápsula de idioma y selector
+    languageCapsuleTitle: 'Idioma',
+    spanish: 'Español',
+    english: 'Inglés',
+    currentLanguage: 'Idioma actual: Español',
+    switchLanguage: 'Cambiar a Inglés',
+    languageSwitchedNotification: 'Cambiado a Español',
 
     // Exportación Categoría Imagen
     exportImageZip: 'Paquete ZIP',
@@ -277,18 +325,42 @@ type I18nContextType = {
   t: (key: TranslationKey) => string;
   language: Language;
   setLanguage: (lang: Language) => void;
+  toggleLanguage: () => void;
 };
 
 const I18nContext = createContext<I18nContextType | undefined>(undefined);
 
-function detectBrowserLanguage(): Language {
-  if (typeof window === 'undefined' || typeof navigator === 'undefined') {
-    return 'en';
+const STORAGE_KEY = 'liquid_preferred_lang';
+
+/**
+ * High-accuracy multi-tier browser and system language detection.
+ * Prioritizes:
+ * 1. User manual localStorage setting.
+ * 2. navigator.languages ordered preference list.
+ * 3. navigator.language.
+ * 4. Fallback system properties.
+ */
+export function detectBrowserLanguage(): Language {
+  if (typeof window === 'undefined') {
+    return 'es';
   }
 
-  // Check all available language lists
+  try {
+    const saved = localStorage.getItem(STORAGE_KEY);
+    if (saved === 'es' || saved === 'en') {
+      return saved;
+    }
+  } catch {
+    // Ignore storage issues in private browsing
+  }
+
+  if (typeof navigator === 'undefined') {
+    return 'es';
+  }
+
   const candidateLanguages: string[] = [];
-  if (navigator.languages && navigator.languages.length > 0) {
+
+  if (Array.isArray(navigator.languages) && navigator.languages.length > 0) {
     candidateLanguages.push(...navigator.languages);
   }
   if (navigator.language) {
@@ -305,52 +377,99 @@ function detectBrowserLanguage(): Language {
 
   for (const lang of candidateLanguages) {
     if (typeof lang === 'string') {
-      const lower = lang.toLowerCase();
+      const lower = lang.toLowerCase().trim();
       if (lower.startsWith('es') || lower.includes('spanish') || lower.includes('es-')) {
         return 'es';
+      }
+      if (lower.startsWith('en') || lower.includes('english') || lower.includes('en-')) {
+        return 'en';
       }
     }
   }
 
-  return 'en';
+  return 'es';
 }
+
+const languageListeners = new Set<() => void>();
 
 function subscribeLanguage(callback: () => void) {
   if (typeof window === 'undefined') return () => {};
-  window.addEventListener('languagechange', callback);
-  return () => window.removeEventListener('languagechange', callback);
+  languageListeners.add(callback);
+  
+  const handleNativeLangChange = () => {
+    // If no manual preference is saved, update automatically on browser change
+    try {
+      const saved = localStorage.getItem(STORAGE_KEY);
+      if (!saved) {
+        callback();
+      }
+    } catch {
+      callback();
+    }
+  };
+
+  window.addEventListener('languagechange', handleNativeLangChange);
+  return () => {
+    languageListeners.delete(callback);
+    window.removeEventListener('languagechange', handleNativeLangChange);
+  };
 }
 
+let cachedLang: Language | null = null;
+
 function getLanguageSnapshot(): Language {
-  return detectBrowserLanguage();
+  if (cachedLang !== null) return cachedLang;
+  cachedLang = detectBrowserLanguage();
+  return cachedLang;
 }
 
 function getServerLanguageSnapshot(): Language {
   return 'es';
 }
 
+function updateLanguage(newLang: Language) {
+  cachedLang = newLang;
+  try {
+    if (typeof window !== 'undefined') {
+      localStorage.setItem(STORAGE_KEY, newLang);
+      document.documentElement.lang = newLang;
+    }
+  } catch (e) {
+    console.warn('Could not save language preference:', e);
+  }
+  languageListeners.forEach(fn => fn());
+}
+
 export function I18nProvider({ children }: { children: React.ReactNode }) {
-  const browserLanguage = useSyncExternalStore(
+  const currentLang = useSyncExternalStore(
     subscribeLanguage,
     getLanguageSnapshot,
     getServerLanguageSnapshot
   );
 
-  const [overrideLanguage, setOverrideLanguage] = useState<Language | null>(null);
-  const language = overrideLanguage || browserLanguage;
-
-  const t = (key: TranslationKey): string => {
-    const langObj = translations[language] as Record<TranslationKey, string>;
-    const defaultObj = translations.es as Record<TranslationKey, string>;
-    return langObj?.[key] || defaultObj?.[key] || translations.en[key] || String(key);
-  };
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      document.documentElement.lang = currentLang;
+    }
+  }, [currentLang]);
 
   const handleSetLanguage = useCallback((lang: Language) => {
-    setOverrideLanguage(lang);
+    updateLanguage(lang);
   }, []);
 
+  const toggleLanguage = useCallback(() => {
+    const nextLang = currentLang === 'es' ? 'en' : 'es';
+    updateLanguage(nextLang);
+  }, [currentLang]);
+
+  const t = useCallback((key: TranslationKey): string => {
+    const langObj = translations[currentLang] as Record<TranslationKey, string>;
+    const defaultObj = translations.es as Record<TranslationKey, string>;
+    return langObj?.[key] || defaultObj?.[key] || translations.en[key] || String(key);
+  }, [currentLang]);
+
   return (
-    <I18nContext.Provider value={{ t, language, setLanguage: handleSetLanguage }}>
+    <I18nContext.Provider value={{ t, language: currentLang, setLanguage: handleSetLanguage, toggleLanguage }}>
       {children}
     </I18nContext.Provider>
   );
