@@ -9,9 +9,11 @@ export interface ChapterInfo {
   imageCount?: number;
   images?: string[];
   status?: 'pending' | 'downloading' | 'completed' | 'error';
-  mediaType?: 'image' | 'video';
+  mediaType?: 'image' | 'video' | 'image_with_audio' | 'audio';
   videoUrl?: string;
+  audioUrl?: string;
   videoEmbedUrl?: string;
+  hasAudio?: boolean;
   author?: string;
   authorUrl?: string;
   retryAttempt?: number;
@@ -35,9 +37,11 @@ export interface Tracker {
   completedChapters?: number;
   currentChapter?: string;
   chapters?: ChapterInfo[];
-  mediaType?: 'image' | 'video';
+  mediaType?: 'image' | 'video' | 'image_with_audio' | 'audio';
   videoUrl?: string;
+  audioUrl?: string;
   videoEmbedUrl?: string;
+  hasAudio?: boolean;
   author?: string;
   authorUrl?: string;
   slowServerMode?: boolean;
