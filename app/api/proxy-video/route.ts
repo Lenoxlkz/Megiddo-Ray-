@@ -131,7 +131,16 @@ export async function GET(req: NextRequest) {
       }, { status: 422 });
     }
 
-    const outContentType = isAudioOnly ? 'audio/mpeg' : (contentType || 'video/mp4');
+    // If audio extraction is requested, delegate to FFmpeg transcoding endpoint
+    if (isAudioOnly) {
+      const convertUrl = new URL('/api/convert-media', req.url);
+      convertUrl.searchParams.set('type', 'mp3');
+      convertUrl.searchParams.set('url', cleanUrl);
+      convertUrl.searchParams.set('filename', filename.endsWith('.mp3') ? filename : `${filename}.mp3`);
+      return NextResponse.redirect(convertUrl);
+    }
+
+    const outContentType = contentType || 'video/mp4';
     const responseHeaders: Record<string, string> = {
       'Content-Type': outContentType,
       'Content-Disposition': `attachment; filename="${encodeURIComponent(filename)}"`,
