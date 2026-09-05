@@ -2,10 +2,11 @@ export interface ExtractedMedia {
   success: boolean;
   chapterName: string;
   seriesTitle?: string;
-  mediaType: 'image' | 'video';
+  mediaType: 'image' | 'video' | 'image_with_audio' | 'audio';
   videoUrl?: string;
   audioUrl?: string;
   videoEmbedUrl?: string;
+  hasAudio?: boolean;
   author?: string;
   authorUrl?: string;
   images: string[];
@@ -479,7 +480,7 @@ export async function extractFacebookMedia(targetUrl: string): Promise<Extracted
 }
 
 /**
- * 3. INSTAGRAM EXTRACTOR (Reels, Posts, Carousels, Stories)
+ * 3. INSTAGRAM EXTRACTOR (Reels, Posts, Carousels, Stories, Audio & Image with Audio)
  */
 export async function extractInstagramMedia(targetUrl: string): Promise<ExtractedMedia> {
   const shortcodeMatch = targetUrl.match(/\/(?:p|reel|tv|reels)\/([a-zA-Z0-9_-]+)/i);
@@ -487,12 +488,36 @@ export async function extractInstagramMedia(targetUrl: string): Promise<Extracte
   const isReelUrl = targetUrl.includes('/reel/') || targetUrl.includes('/reels/') || targetUrl.includes('/tv/');
   let isDetectedVideo = isReelUrl;
   let videoUrl = '';
+  let audioUrl = '';
   let chapterName = '';
   let author = '';
   const images: string[] = [];
   const carouselItems: { url: string; isVideo: boolean; videoUrl?: string }[] = [];
 
   const cleanLookupUrl = shortcode ? (isReelUrl ? `https://www.instagram.com/reel/${shortcode}/` : `https://www.instagram.com/p/${shortcode}/`) : targetUrl;
+
+  // Tier 0: Check yt-dlp metadata for video/audio streams if it's a video or reel
+  if (isReelUrl || targetUrl.includes('instagram.com/')) {
+    try {
+      const ytdl = await runYtDlpMetadata(cleanLookupUrl);
+      if (ytdl) {
+        if (ytdl.title && !chapterName) chapterName = ytdl.title;
+        if (ytdl.author && !author) author = `@${ytdl.author.replace('@', '')}`;
+        if (ytdl.url) {
+          videoUrl = ytdl.url;
+          isDetectedVideo = true;
+        }
+        if (ytdl.audioUrl) {
+          audioUrl = ytdl.audioUrl;
+        }
+        if (ytdl.thumbnail && !images.includes(ytdl.thumbnail)) {
+          images.push(ytdl.thumbnail);
+        }
+      }
+    } catch {
+      // Ignore
+    }
+  }
 
   // Tier 1: Dedicated Instagram Downloader (Fast, High-Def, extracts direct CDN URLs)
   try {
@@ -536,6 +561,7 @@ export async function extractInstagramMedia(targetUrl: string): Promise<Extracte
           const isItemVideo = itemUrl.includes('.mp4') || itemUrl.includes('video') || isDetectedVideo || item.filename?.includes('.mp4');
           if (isItemVideo) {
             if (!videoUrl) videoUrl = itemUrl;
+            if (!audioUrl) audioUrl = itemUrl;
             isDetectedVideo = true;
           }
           if (itemThumb && !images.includes(itemThumb)) {
@@ -604,7 +630,9 @@ export async function extractInstagramMedia(targetUrl: string): Promise<Extracte
           jsonStr.includes('carousel_media') ||
           jsonStr.includes('edge_sidecar_to_children') ||
           jsonStr.includes('xdt_shortcode_media') ||
-          jsonStr.includes('image_versions2')
+          jsonStr.includes('image_versions2') ||
+          jsonStr.includes('music_metadata') ||
+          jsonStr.includes('audio_src')
         ) {
           try {
             const parsed = JSON.parse(jsonStr);
@@ -615,6 +643,27 @@ export async function extractInstagramMedia(targetUrl: string): Promise<Extracte
                 return;
               }
               if (typeof obj === 'object') {
+                if (obj.audio_src && typeof obj.audio_src === 'string' && obj.audio_src.startsWith('http')) {
+                  audioUrl = obj.audio_src;
+                }
+                if (obj.progressive_download_url && typeof obj.progressive_download_url === 'string' && obj.progressive_download_url.startsWith('http')) {
+                  audioUrl = obj.progressive_download_url;
+                }
+                if (obj.music_asset_info?.progressive_download_url && typeof obj.music_asset_info.progressive_download_url === 'string') {
+                  audioUrl = obj.music_asset_info.progressive_download_url;
+                }
+                if (obj.music_info?.music_asset_info?.progressive_download_url && typeof obj.music_info.music_asset_info.progressive_download_url === 'string') {
+                  audioUrl = obj.music_info.music_asset_info.progressive_download_url;
+                }
+                if (obj.clips_metadata?.music_info?.music_asset_info?.progressive_download_url && typeof obj.clips_metadata.music_info.music_asset_info.progressive_download_url === 'string') {
+                  audioUrl = obj.clips_metadata.music_info.music_asset_info.progressive_download_url;
+                }
+                if (obj.audio_ranking_info?.audio_asset_url && typeof obj.audio_ranking_info.audio_asset_url === 'string') {
+                  audioUrl = obj.audio_ranking_info.audio_asset_url;
+                }
+                if (obj.audio_url && typeof obj.audio_url === 'string' && obj.audio_url.startsWith('http')) {
+                  audioUrl = obj.audio_url;
+                }
                 if (Array.isArray(obj.carousel_media) && obj.carousel_media.length > 0) {
                   obj.carousel_media.forEach((item: any) => {
                     const candidate = item.image_versions2?.candidates?.[0]?.url || item.display_url;
@@ -712,7 +761,33 @@ export async function extractInstagramMedia(targetUrl: string): Promise<Extracte
     }
   }
 
-  const finalMediaType = (isDetectedVideo || videoUrl) ? 'video' : 'image';
+  // If videoUrl is available, audio can be extracted from video stream
+  if (videoUrl && !audioUrl) {
+    audioUrl = videoUrl;
+  }
+
+  let finalMediaType: 'image' | 'video' | 'image_with_audio' = (isDetectedVideo || videoUrl) ? 'video' : 'image';
+  if (finalMediaType === 'image' && (audioUrl || targetUrl.includes('igsh=') || targetUrl.includes('igsi='))) {
+    // If it's a single image post with audio or potential audio track
+    finalMediaType = 'image_with_audio';
+  }
+
+  // Workaround for Instagram API blocking audio tracks on image posts:
+  // Since we cannot fetch the direct audio URL without an authenticated session,
+  // we clear the `hasAudio` flag and downgrade it if it strictly doesn't have an audioUrl.
+  // This explicitly prevents the app from generating muted video or throwing generic MP3 errors.
+  let hasAudio = !!(audioUrl || videoUrl);
+  
+  if (finalMediaType === 'image_with_audio' && !audioUrl) {
+    // We detected it MIGHT have audio (via URL igsh param), but we couldn't extract the direct audio stream.
+    // We must signal to the caller that the audio is missing or blocked, or fallback gracefully.
+    // Instead of forcing 'image_with_audio' which causes muted exports, we revert to 'image'.
+    // The user will see it purely as an Image, which is factually what we could extract.
+    finalMediaType = 'image';
+    hasAudio = false;
+  }
+
+  const cleanImages = [...new Set(images.filter(Boolean))];
 
   return {
     success: true,
@@ -720,9 +795,11 @@ export async function extractInstagramMedia(targetUrl: string): Promise<Extracte
     seriesTitle: author ? `Instagram de ${author}` : 'Instagram',
     mediaType: finalMediaType,
     videoUrl,
+    audioUrl: audioUrl || (videoUrl ? videoUrl : undefined),
+    hasAudio,
     author,
     authorUrl: author ? `https://www.instagram.com/${author.replace('@', '')}` : undefined,
-    images: [...new Set(images.filter(Boolean))]
+    images: cleanImages
   };
 }
 
