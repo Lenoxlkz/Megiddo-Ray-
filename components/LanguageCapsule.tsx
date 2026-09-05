@@ -1,9 +1,10 @@
 'use client';
 
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { useI18n, Language } from '@/components/I18nProvider';
-import { Globe, Sparkles, Check } from 'lucide-react';
+import { useTheme } from '@/components/ThemeProvider';
+import { Globe, Sparkles, Check, Sun, Moon, ChevronRight, ChevronLeft } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 interface Ripple {
@@ -14,15 +15,36 @@ interface Ripple {
 
 export function LanguageCapsule() {
   const { language, setLanguage, toggleLanguage, t } = useI18n();
+  const { theme, toggleTheme } = useTheme();
+  const isLight = theme === 'light';
+
   const [ripples, setRipples] = useState<Ripple[]>([]);
   const [isWaving, setIsWaving] = useState(false);
   const [isHovered, setIsHovered] = useState(false);
+  const [isCollapsed, setIsCollapsed] = useState<boolean>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('liquid_lang_capsule_collapsed');
+        if (saved !== null) {
+          return saved === 'true';
+        }
+      } catch {}
+    }
+    return false;
+  });
+
+  const handleToggleCollapse = (collapsed: boolean) => {
+    setIsCollapsed(collapsed);
+    try {
+      localStorage.setItem('liquid_lang_capsule_collapsed', String(collapsed));
+    } catch {}
+  };
 
   const triggerWaterWave = useCallback((e?: React.MouseEvent<HTMLElement>) => {
     // Generate ripple at click coordinate or center of button
     const rect = e?.currentTarget?.getBoundingClientRect();
-    const x = rect && e ? e.clientX - rect.left : 80;
-    const y = rect && e ? e.clientY - rect.top : 20;
+    const x = rect && e ? e.clientX - rect.left : 40;
+    const y = rect && e ? e.clientY - rect.top : 80;
 
     const newRipple: Ripple = {
       id: Date.now() + Math.random(),
@@ -30,20 +52,21 @@ export function LanguageCapsule() {
       y
     };
 
-    setRipples((prev) => [...prev.slice(-3), newRipple]);
+    setRipples((prev) => [...prev.slice(-2), newRipple]);
     setIsWaving(true);
 
     // Auto clear ripple after animation
     setTimeout(() => {
       setRipples((prev) => prev.filter((r) => r.id !== newRipple.id));
-    }, 900);
+    }, 700);
 
     setTimeout(() => {
       setIsWaving(false);
-    }, 1200);
+    }, 900);
   }, []);
 
   const handleSelectLanguage = (targetLang: Language, e: React.MouseEvent<HTMLButtonElement>) => {
+    e.stopPropagation();
     if (language !== targetLang) {
       triggerWaterWave(e);
       setLanguage(targetLang);
@@ -52,188 +75,313 @@ export function LanguageCapsule() {
     }
   };
 
-  const handleCapsuleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    // If user clicked the container background instead of specific button, toggle
-    if ((e.target as HTMLElement).tagName !== 'BUTTON') {
-      triggerWaterWave(e);
-      toggleLanguage();
-    }
-  };
-
   return (
-    <div 
+    <aside 
       id="language-capsule-container"
-      className="fixed bottom-5 left-1/2 -translate-x-1/2 z-40 select-none pointer-events-auto"
+      aria-label="Language and theme preferences"
+      className="fixed right-2.5 sm:right-4 top-1/2 -translate-y-1/2 z-50 select-none pointer-events-auto"
     >
       {/* Dynamic Concentric Water Wave Rings */}
       <AnimatePresence>
         {ripples.map((ripple) => (
           <motion.div
             key={ripple.id}
-            initial={{ scale: 0.2, opacity: 0.8, borderWidth: '3px' }}
-            animate={{ scale: 2.6, opacity: 0, borderWidth: '1px' }}
+            initial={{ scale: 0.2, opacity: 0.8, borderWidth: '2px' }}
+            animate={{ scale: 2.2, opacity: 0, borderWidth: '1px' }}
             exit={{ opacity: 0 }}
-            transition={{ duration: 0.85, ease: [0.22, 1, 0.36, 1] }}
-            className="absolute rounded-full border border-cyan-400/80 bg-cyan-400/10 pointer-events-none -z-10 shadow-[0_0_25px_rgba(6,182,212,0.4)]"
+            transition={{ duration: 0.65, ease: [0.22, 1, 0.36, 1] }}
+            className="absolute rounded-full border border-cyan-400/70 bg-cyan-400/10 pointer-events-none -z-10 shadow-[0_0_20px_rgba(6,182,212,0.35)]"
             style={{
               left: ripple.x,
               top: ripple.y,
-              width: 140,
-              height: 140,
-              marginLeft: -70,
-              marginTop: -70,
+              width: 100,
+              height: 100,
+              marginLeft: -50,
+              marginTop: -50,
             }}
           />
         ))}
       </AnimatePresence>
 
-      {/* Main Liquid Capsule */}
-      <motion.div
-        onMouseEnter={() => setIsHovered(true)}
-        onMouseLeave={() => setIsHovered(false)}
-        onClick={handleCapsuleClick}
-        whileHover={{ scale: 1.04, y: -2 }}
-        whileTap={{ scale: 0.97 }}
-        className={cn(
-          "relative flex items-center gap-1.5 p-1.5 rounded-full border transition-all duration-300 shadow-2xl backdrop-blur-2xl cursor-pointer overflow-hidden group",
-          "bg-neutral-950/85 border-white/15 hover:border-cyan-400/50 hover:shadow-cyan-500/20",
-          isWaving && "border-cyan-400/70 shadow-[0_0_30px_rgba(6,182,212,0.35)] ring-2 ring-cyan-400/30"
-        )}
-      >
-        {/* Liquid Wave Animated Background */}
-        <div className="absolute inset-0 pointer-events-none overflow-hidden rounded-full opacity-40">
+      <AnimatePresence mode="wait">
+        {/* 1. MODO DISMINUIDO (COLAPSADO / MINIMIZADO): No interrumpe la vista */}
+        {isCollapsed ? (
           <motion.div
-            animate={{
-              x: isWaving ? ['-50%', '0%', '-50%'] : ['0%', '-50%'],
-              y: isWaving ? [0, -3, 0] : [0, 0],
-            }}
-            transition={{
-              x: { duration: isWaving ? 2 : 7, repeat: Infinity, ease: 'linear' },
-              y: { duration: 1.5, repeat: Infinity, ease: 'easeInOut' }
-            }}
-            className="absolute -inset-y-2 -left-[100%] w-[300%] flex"
-          >
-            {/* SVG Water Wave Geometry */}
-            <svg 
-              className="w-full h-full fill-cyan-500/20"
-              viewBox="0 0 1200 120" 
-              preserveAspectRatio="none"
-            >
-              <path d="M0,0 C150,90 350,-40 500,50 C650,140 900,-30 1200,40 L1200,120 L0,120 Z" />
-            </svg>
-          </motion.div>
-
-          <motion.div
-            animate={{
-              x: isWaving ? ['0%', '-50%', '0%'] : ['-50%', '0%'],
-            }}
-            transition={{
-              x: { duration: isWaving ? 2.5 : 9, repeat: Infinity, ease: 'linear' }
-            }}
-            className="absolute -inset-y-1 -left-[100%] w-[300%] flex opacity-50"
-          >
-            <svg 
-              className="w-full h-full fill-emerald-500/20"
-              viewBox="0 0 1200 120" 
-              preserveAspectRatio="none"
-            >
-              <path d="M0,20 C200,100 400,-20 600,60 C800,140 1000,-10 1200,50 L1200,120 L0,120 Z" />
-            </svg>
-          </motion.div>
-        </div>
-
-        {/* Left Icon with Shimmer / Globe */}
-        <div className="flex items-center pl-2.5 pr-1.5 py-1 text-cyan-400">
-          <motion.div
-            animate={isWaving ? { rotate: [0, -15, 15, -10, 10, 0], scale: [1, 1.25, 1] } : { rotate: 0, scale: 1 }}
-            transition={{ duration: 0.8 }}
+            key="capsule-collapsed"
+            initial={{ opacity: 0, x: 20, scale: 0.9 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 20, scale: 0.9 }}
+            transition={{ type: "spring", stiffness: 400, damping: 25 }}
             className="relative"
           >
-            <Globe className="w-4 h-4 text-cyan-400 drop-shadow-[0_0_8px_rgba(6,182,212,0.8)]" />
-            {isWaving && (
-              <motion.div
-                initial={{ scale: 0, opacity: 0 }}
-                animate={{ scale: 1.5, opacity: 1 }}
-                exit={{ opacity: 0 }}
-                className="absolute -top-1 -right-1"
-              >
-                <Sparkles className="w-2.5 h-2.5 text-emerald-300 animate-spin" />
-              </motion.div>
-            )}
-          </motion.div>
-        </div>
-
-        {/* Language Options: ES & EN */}
-        <div className="flex items-center gap-1 relative z-10 bg-white/[0.04] p-1 rounded-full border border-white/5">
-          {/* Spanish Button */}
-          <button
-            id="lang-es-btn"
-            type="button"
-            onClick={(e) => handleSelectLanguage('es', e)}
-            className={cn(
-              "relative px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide transition-all duration-300 flex items-center gap-1.5 cursor-pointer",
-              language === 'es' 
-                ? "text-white shadow-sm" 
-                : "text-neutral-400 hover:text-white"
-            )}
-            title={t('spanish')}
-          >
-            {language === 'es' && (
-              <motion.div
-                layoutId="active-language-fluid-pill"
-                transition={{ type: "spring", stiffness: 380, damping: 28 }}
-                className="absolute inset-0 rounded-full bg-gradient-to-r from-emerald-500/80 to-cyan-500/80 shadow-[0_0_15px_rgba(16,185,129,0.4)] border border-white/25 -z-10"
-              />
-            )}
-            <span className="text-sm leading-none">🇪🇸</span>
-            <span>ES</span>
-            {language === 'es' && (
-              <Check className="w-3 h-3 text-white/90 stroke-[2.5]" />
-            )}
-          </button>
-
-          {/* English Button */}
-          <button
-            id="lang-en-btn"
-            type="button"
-            onClick={(e) => handleSelectLanguage('en', e)}
-            className={cn(
-              "relative px-3 py-1.5 rounded-full text-xs font-semibold tracking-wide transition-all duration-300 flex items-center gap-1.5 cursor-pointer",
-              language === 'en' 
-                ? "text-white shadow-sm" 
-                : "text-neutral-400 hover:text-white"
-            )}
-            title={t('english')}
-          >
-            {language === 'en' && (
-              <motion.div
-                layoutId="active-language-fluid-pill"
-                transition={{ type: "spring", stiffness: 380, damping: 28 }}
-                className="absolute inset-0 rounded-full bg-gradient-to-r from-cyan-500/80 to-blue-500/80 shadow-[0_0_15px_rgba(6,182,212,0.4)] border border-white/25 -z-10"
-              />
-            )}
-            <span className="text-sm leading-none">🇬🇧</span>
-            <span>EN</span>
-            {language === 'en' && (
-              <Check className="w-3 h-3 text-white/90 stroke-[2.5]" />
-            )}
-          </button>
-        </div>
-
-        {/* Hover / Active Tooltip */}
-        <AnimatePresence>
-          {isHovered && (
-            <motion.div
-              initial={{ opacity: 0, y: 8, scale: 0.92 }}
-              animate={{ opacity: 1, y: 0, scale: 1 }}
-              exit={{ opacity: 0, y: 8, scale: 0.92 }}
-              className="absolute -top-9 left-1/2 -translate-x-1/2 px-3 py-1 rounded-full bg-neutral-900/95 border border-cyan-400/40 text-[11px] font-medium text-cyan-200 shadow-xl backdrop-blur-md whitespace-nowrap pointer-events-none"
+            <motion.button
+              id="expand-language-capsule-btn"
+              type="button"
+              onClick={() => handleToggleCollapse(false)}
+              whileHover={{ scale: 1.05, x: -2 }}
+              whileTap={{ scale: 0.95 }}
+              className={cn(
+                "flex flex-col items-center gap-2 py-2.5 px-2 rounded-2xl border transition-all duration-300 shadow-2xl backdrop-blur-xl cursor-pointer group select-none",
+                isLight
+                  ? "bg-white/95 border-emerald-600/30 text-emerald-900 shadow-[0_8px_24px_rgba(0,0,0,0.12)] hover:border-emerald-500"
+                  : "staros-glass border-cyan-400/40 text-cyan-300 shadow-[0_0_20px_rgba(6,182,212,0.25)] hover:border-cyan-400/80 hover:shadow-[0_0_25px_rgba(6,182,212,0.45)]"
+              )}
+              title={language === 'es' ? 'Desplegar panel de idioma y tema' : 'Expand language & theme panel'}
+              aria-label="Expand language and theme panel"
             >
-              {language === 'es' ? '🇪🇸 Español activo (Clic para alternar)' : '🇬🇧 English active (Click to toggle)'}
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </motion.div>
-    </div>
+              {/* Botón de Desplegar */}
+              <div className={cn(
+                "p-1 rounded-full transition-transform group-hover:scale-110",
+                isLight ? "bg-emerald-500/20 text-emerald-800" : "bg-cyan-400/15 text-cyan-300"
+              )}>
+                <ChevronLeft className="w-3.5 h-3.5" />
+              </div>
+
+              {/* Icono de Globo */}
+              <Globe className="w-3.5 h-3.5 opacity-80" />
+
+              {/* Indicador de Idioma Actual */}
+              <span className={cn(
+                "text-[10px] font-black tracking-wider font-mono px-1 py-0.5 rounded",
+                isLight ? "bg-emerald-100 text-emerald-950" : "bg-white/10 text-white"
+              )}>
+                {language.toUpperCase()}
+              </span>
+
+              {/* Indicador de Tema Actual */}
+              <div className="opacity-90">
+                {theme === 'dark' ? (
+                  <Moon className="w-3.5 h-3.5 text-amber-300" />
+                ) : (
+                  <Sun className="w-3.5 h-3.5 text-emerald-700" />
+                )}
+              </div>
+
+              {/* Texto Vertical Sutil "Desplegar" */}
+              <span className={cn(
+                "text-[9px] font-bold uppercase tracking-wider py-1 opacity-70 group-hover:opacity-100 [writing-mode:vertical-lr] rotate-180",
+                isLight ? "text-neutral-700" : "text-cyan-200"
+              )}>
+                {language === 'es' ? 'Desplegar' : 'Expand'}
+              </span>
+            </motion.button>
+          </motion.div>
+        ) : (
+          /* 2. MODO DESPLEGADO VERTICAL: Panel Completo en el Lateral Derecho Medio */
+          <motion.div
+            key="capsule-expanded"
+            initial={{ opacity: 0, x: 20, scale: 0.95 }}
+            animate={{ opacity: 1, x: 0, scale: 1 }}
+            exit={{ opacity: 0, x: 20, scale: 0.95 }}
+            transition={{ type: "spring", stiffness: 420, damping: 26 }}
+            onMouseEnter={() => setIsHovered(true)}
+            onMouseLeave={() => setIsHovered(false)}
+            className={cn(
+              "relative flex flex-col items-center gap-2 p-2 rounded-2xl border transition-all duration-300 shadow-2xl backdrop-blur-xl select-none w-[76px]",
+              isLight
+                ? "bg-white/95 border-emerald-600/30 shadow-[0_12px_32px_rgba(0,0,0,0.15)] text-neutral-900"
+                : "staros-glass border-white/20 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.25),0_12px_30px_rgba(0,0,0,0.45)] text-neutral-100",
+              isWaving && "border-cyan-400/80 shadow-[0_0_25px_rgba(6,182,212,0.4)] ring-2 ring-cyan-400/30"
+            )}
+          >
+            {/* Header: Botón de Disminuir (Minimizar) con Icono ChevronRight */}
+            <div className="w-full flex items-center justify-between pb-1.5 border-b border-white/10 dark:border-white/10 light:border-black/10">
+              <div className="flex items-center gap-1 pl-0.5">
+                <motion.div
+                  animate={isWaving ? { rotate: [0, -15, 15, -10, 10, 0], scale: [1, 1.2, 1] } : { rotate: 0, scale: 1 }}
+                  transition={{ duration: 0.6 }}
+                  className="relative cursor-pointer"
+                  onClick={() => toggleLanguage()}
+                  title={language === 'es' ? 'Alternar Idioma' : 'Toggle Language'}
+                >
+                  <Globe className={cn(
+                    "w-3.5 h-3.5",
+                    isLight ? "text-emerald-700" : "text-cyan-400 drop-shadow-[0_0_6px_rgba(6,182,212,0.7)]"
+                  )} />
+                  {isWaving && (
+                    <motion.div
+                      initial={{ scale: 0, opacity: 0 }}
+                      animate={{ scale: 1.4, opacity: 1 }}
+                      exit={{ opacity: 0 }}
+                      className="absolute -top-1 -right-1"
+                    >
+                      <Sparkles className="w-2 h-2 text-emerald-300 animate-spin" />
+                    </motion.div>
+                  )}
+                </motion.div>
+              </div>
+
+              {/* Botón de Disminuir */}
+              <button
+                id="collapse-language-capsule-btn"
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleToggleCollapse(true);
+                }}
+                className={cn(
+                  "p-1 rounded-lg transition-all cursor-pointer flex items-center justify-center",
+                  isLight
+                    ? "bg-black/5 hover:bg-black/10 text-neutral-700 hover:text-neutral-950"
+                    : "bg-white/5 hover:bg-white/15 text-neutral-400 hover:text-white"
+                )}
+                title={language === 'es' ? 'Disminuir para no interrumpir la vista' : 'Minimize to avoid blocking the view'}
+                aria-label="Collapse panel"
+              >
+                <ChevronRight className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Opciones de Idioma en Columna Vertical: ES & EN */}
+            <div className={cn(
+              "flex flex-col items-center gap-1 w-full p-1 rounded-xl border relative z-10",
+              isLight ? "bg-black/[0.04] border-black/10" : "bg-white/[0.04] border-white/10"
+            )}>
+              {/* Opción Español */}
+              <button
+                id="lang-es-btn"
+                type="button"
+                onClick={(e) => handleSelectLanguage('es', e)}
+                className={cn(
+                  "relative w-full py-1.5 px-1 rounded-lg text-[11px] font-bold tracking-wider transition-all duration-200 flex flex-col items-center justify-center gap-0.5 cursor-pointer select-none",
+                  language === 'es' 
+                    ? (isLight ? "text-emerald-950 font-black" : "text-white") 
+                    : (isLight ? "text-neutral-600 hover:text-neutral-950" : "text-neutral-400 hover:text-white")
+                )}
+                title={t('spanish')}
+              >
+                {language === 'es' && (
+                  <motion.div
+                    layoutId="active-language-fluid-pill"
+                    transition={{ type: "spring", stiffness: 420, damping: 28 }}
+                    className={cn(
+                      "absolute inset-0 rounded-lg -z-10 shadow-sm border",
+                      isLight 
+                        ? "bg-emerald-500/25 border-emerald-600/40 shadow-[0_0_8px_rgba(16,185,129,0.25)]"
+                        : "bg-gradient-to-b from-emerald-500/90 to-cyan-500/90 shadow-[0_0_12px_rgba(16,185,129,0.4)] border-white/25"
+                    )}
+                  />
+                )}
+                <span>ES</span>
+                {language === 'es' && (
+                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                )}
+              </button>
+
+              {/* Opción Inglés */}
+              <button
+                id="lang-en-btn"
+                type="button"
+                onClick={(e) => handleSelectLanguage('en', e)}
+                className={cn(
+                  "relative w-full py-1.5 px-1 rounded-lg text-[11px] font-bold tracking-wider transition-all duration-200 flex flex-col items-center justify-center gap-0.5 cursor-pointer select-none",
+                  language === 'en' 
+                    ? (isLight ? "text-cyan-950 font-black" : "text-white") 
+                    : (isLight ? "text-neutral-600 hover:text-neutral-950" : "text-neutral-400 hover:text-white")
+                )}
+                title={t('english')}
+              >
+                {language === 'en' && (
+                  <motion.div
+                    layoutId="active-language-fluid-pill"
+                    transition={{ type: "spring", stiffness: 420, damping: 28 }}
+                    className={cn(
+                      "absolute inset-0 rounded-lg -z-10 shadow-sm border",
+                      isLight 
+                        ? "bg-cyan-500/25 border-cyan-600/40 shadow-[0_0_8px_rgba(6,182,212,0.25)]"
+                        : "bg-gradient-to-b from-cyan-500/90 to-blue-500/90 shadow-[0_0_12px_rgba(6,182,212,0.4)] border-white/25"
+                    )}
+                  />
+                )}
+                <span>EN</span>
+                {language === 'en' && (
+                  <Check className="w-2.5 h-2.5 stroke-[3]" />
+                )}
+              </button>
+            </div>
+
+            {/* Separador Horizontal Sutil */}
+            <div className={cn(
+              "w-6 h-px my-0.5 shrink-0",
+              isLight ? "bg-black/15" : "bg-white/20"
+            )} />
+
+            {/* Botón de Modos Claro y Oscuro */}
+            <button
+              id="theme-toggle-btn"
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                triggerWaterWave(e);
+                toggleTheme();
+              }}
+              className={cn(
+                "relative w-full py-2 px-1 rounded-xl transition-all duration-300 flex items-center justify-center cursor-pointer border shrink-0",
+                theme === 'dark'
+                  ? "text-amber-300 hover:text-amber-200 bg-amber-400/15 hover:bg-amber-400/25 border-amber-400/30 shadow-[0_0_12px_rgba(251,191,36,0.25)]"
+                  : "text-emerald-800 hover:text-emerald-950 bg-emerald-500/20 hover:bg-emerald-500/30 border-emerald-600/35 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+              )}
+              title={
+                theme === 'dark'
+                  ? (language === 'es' ? 'Modo Oscuro (Clic para Claro)' : 'Dark Mode (Click for Light)')
+                  : (language === 'es' ? 'Modo Claro (Clic para Oscuro)' : 'Light Mode (Click for Dark)')
+              }
+              aria-label="Toggle theme mode"
+            >
+              <AnimatePresence mode="wait">
+                {theme === 'dark' ? (
+                  <motion.div
+                    key="moon-icon"
+                    initial={{ rotate: -70, scale: 0.6, opacity: 0 }}
+                    animate={{ rotate: 0, scale: 1, opacity: 1 }}
+                    exit={{ rotate: 70, scale: 0.6, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <Moon className="w-4 h-4 stroke-[2.5]" />
+                  </motion.div>
+                ) : (
+                  <motion.div
+                    key="sun-icon"
+                    initial={{ rotate: 70, scale: 0.6, opacity: 0 }}
+                    animate={{ rotate: 0, scale: 1, opacity: 1 }}
+                    exit={{ rotate: -70, scale: 0.6, opacity: 0 }}
+                    transition={{ duration: 0.2 }}
+                  >
+                    <Sun className="w-4 h-4 stroke-[2.5]" />
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </button>
+
+            {/* Tooltip Contextual Flotante hacia la Izquierda */}
+            <AnimatePresence>
+              {isHovered && (
+                <motion.div
+                  initial={{ opacity: 0, x: 8, scale: 0.94 }}
+                  animate={{ opacity: 1, x: 0, scale: 1 }}
+                  exit={{ opacity: 0, x: 8, scale: 0.94 }}
+                  className={cn(
+                    "absolute right-full top-1/2 -translate-y-1/2 mr-2.5 px-2.5 py-1.5 rounded-xl text-[11px] font-medium shadow-xl backdrop-blur-md whitespace-nowrap pointer-events-none border",
+                    isLight
+                      ? "bg-white/95 border-emerald-500/30 text-emerald-950 shadow-md"
+                      : "bg-neutral-900/95 border-cyan-400/40 text-cyan-200 shadow-xl"
+                  )}
+                >
+                  <div className="flex flex-col gap-0.5 text-center">
+                    <span className="font-bold">
+                      {language === 'es' ? 'Español' : 'English'} • {theme === 'dark' ? (language === 'es' ? 'Modo Oscuro' : 'Dark Mode') : (language === 'es' ? 'Modo Claro' : 'Light Mode')}
+                    </span>
+                    <span className="text-[10px] opacity-75">
+                      {language === 'es' ? 'Clic en ❯ para disminuir' : 'Click ❯ to minimize'}
+                    </span>
+                  </div>
+                </motion.div>
+              )}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </aside>
   );
 }
+

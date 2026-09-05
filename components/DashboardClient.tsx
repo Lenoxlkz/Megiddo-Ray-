@@ -49,7 +49,17 @@ import { TerminalTitle } from '@/components/TerminalTitle';
 import { LanguageCapsule } from '@/components/LanguageCapsule';
 import { exportWithPdfLib, exportWithImg2Pdf } from '@/lib/pdfExporter';
 import { exportImagesPackage, downloadSingleImage } from '@/lib/imageExporter';
-import { exportVideo, exportAudioMp3 } from '@/lib/videoExporter';
+import { exportVideo, exportAudioMp3, exportImageWithAudioAsVideo } from '@/lib/videoExporter';
+import { AudioLinkModal } from '@/components/AudioLinkModal';
+import { useTheme } from '@/components/ThemeProvider';
+import { 
+  StarOSAtmosphereBackground, 
+  StarOSToggle, 
+  StarOSPillButton, 
+  StarOSSelectorPanel, 
+  starosSpring, 
+  starosBouncySpring 
+} from '@/components/StarOSControls';
 
 const getProxiedImageUrl = (url: string) => {
   if (!url) return '';
@@ -148,8 +158,10 @@ function getStoredTrackers(): Tracker[] {
               completedChapters: typeof item.completedChapters === 'number' ? item.completedChapters : undefined,
               currentChapter: typeof item.currentChapter === 'string' ? item.currentChapter : undefined,
               chapters: Array.isArray(item.chapters) ? item.chapters : [],
-              mediaType: (item.mediaType === 'image' || item.mediaType === 'video') ? item.mediaType : undefined,
+              mediaType: (item.mediaType === 'image' || item.mediaType === 'video' || item.mediaType === 'image_with_audio' || item.mediaType === 'audio') ? item.mediaType : undefined,
               videoUrl: typeof item.videoUrl === 'string' ? item.videoUrl : undefined,
+              audioUrl: typeof item.audioUrl === 'string' ? item.audioUrl : undefined,
+              hasAudio: typeof item.hasAudio === 'boolean' ? item.hasAudio : undefined,
               videoEmbedUrl: typeof item.videoEmbedUrl === 'string' ? item.videoEmbedUrl : undefined,
               author: typeof item.author === 'string' ? item.author : undefined,
               authorUrl: typeof item.authorUrl === 'string' ? item.authorUrl : undefined,
@@ -190,6 +202,8 @@ function updateTrackersGlobal(updater: Tracker[] | ((prev: Tracker[]) => Tracker
 
 export default function DashboardClient() {
   const { t, language } = useI18n();
+  const { theme } = useTheme();
+  const isLight = theme === 'light';
   const trackers = useSyncExternalStore(
     subscribeTrackers,
     getStoredTrackers,
@@ -201,6 +215,7 @@ export default function DashboardClient() {
   }, []);
 
   const [showNewModal, setShowNewModal] = useState(false);
+  const [isTypeSelectorOpen, setIsTypeSelectorOpen] = useState(false);
   const [newUrl, setNewUrl] = useState('');
   const [newCategory, setNewCategory] = useState<SearchCategory>('manga');
   const [newMode, setNewMode] = useState<TrackingMode>('single');
@@ -218,6 +233,16 @@ export default function DashboardClient() {
   const [downloadingSinglePage, setDownloadingSinglePage] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const [audioModalData, setAudioModalData] = useState<{
+    isOpen: boolean;
+    tracker: Tracker | null;
+    chapter?: ChapterInfo | null;
+  }>({
+    isOpen: false,
+    tracker: null,
+    chapter: null,
+  });
 
   // Active tracking controllers for pausing / stopping / resuming
   const controlsRef = useRef<Record<string, TaskControl>>({});
@@ -278,6 +303,16 @@ export default function DashboardClient() {
   const openNewTaskModal = () => {
     setNewUrl('');
     setShowNewModal(true);
+    setIsTypeSelectorOpen(false);
+    setTimeout(() => {
+      inputRef.current?.focus();
+    }, 150);
+  };
+
+  const closeNewTaskSettings = () => {
+    setShowNewModal(false);
+    setNewUrl('');
+    setIsTypeSelectorOpen(false);
   };
 
   const toggleCustomPanel = (trackerId: string) => {
@@ -801,6 +836,134 @@ export default function DashboardClient() {
     }
   };
 
+  // Dedicated Exporter for Videos, Audio MP3, and Static Image + Audio to MP4 Video
+  const handleUpdateAudio = useCallback((
+    trackerId: string,
+    chapterId: string | number | undefined,
+    audioUrl: string,
+    audioTitle?: string
+  ) => {
+    setTrackers(prev => {
+      return prev.map(t => {
+        if (t.id === trackerId) {
+          const updatedChapters = t.chapters?.map(c => {
+            if (c.id === chapterId || (!chapterId && t.chapters?.length === 1)) {
+              return {
+                ...c,
+                audioUrl: audioUrl || undefined,
+                hasAudio: !!audioUrl,
+                mediaType: (audioUrl ? 'image_with_audio' : c.mediaType) as any,
+              };
+            }
+            return c;
+          });
+
+          return {
+            ...t,
+            audioUrl: audioUrl || undefined,
+            hasAudio: !!audioUrl,
+            mediaType: (audioUrl ? 'image_with_audio' : t.mediaType) as any,
+            chapters: updatedChapters || t.chapters,
+          };
+        }
+        return t;
+      });
+    });
+
+    if (audioUrl) {
+      showToast('Pista de audio vinculada con éxito. Ya puedes exportar MP3 o video MP4 con sonido.');
+    } else {
+      showToast('Pista de audio desvinculada');
+    }
+  }, [showToast, setTrackers]);
+
+  const handleExportVideo = async (
+    tracker: Tracker,
+    format: 'mp4' | 'mp3' = 'mp4',
+    customUrl?: string,
+    customTitle?: string,
+    chapterId?: string | number
+  ) => {
+    const activeChapter = chapterId ? tracker.chapters?.find(c => c.id === chapterId) : tracker.chapters?.[0];
+    const targetUrl = customUrl || activeChapter?.videoUrl || activeChapter?.audioUrl || activeChapter?.url || tracker.videoUrl || tracker.audioUrl || tracker.url;
+    const targetAudioUrl = activeChapter?.audioUrl || tracker.audioUrl;
+    const targetImageUrl = activeChapter?.images?.[0] || tracker.images?.[0];
+    const isImageWithAudio = tracker.mediaType === 'image_with_audio' || activeChapter?.mediaType === 'image_with_audio' || (targetImageUrl && targetAudioUrl);
+
+    // If Instagram post has no direct audio or video, prompt user to link or search audio
+    const hasValidAudioOrVideo = targetAudioUrl || tracker.videoUrl || activeChapter?.videoUrl || (targetUrl && (targetUrl.endsWith('.mp4') || targetUrl.endsWith('.mp3')));
+    const isInstagramPhotoPost = (tracker.url?.includes('instagram.com') || tracker.url?.includes('instagr.am')) && !hasValidAudioOrVideo;
+
+    if (isInstagramPhotoPost && !targetAudioUrl) {
+      showToast('Instagram restringe la música en fotos estáticas. Abre el panel para vincular o buscar la canción en 1 clic.');
+      setAudioModalData({ isOpen: true, tracker, chapter: activeChapter || null });
+      return;
+    }
+
+    setGeneratingExport({ id: tracker.id, chapterId, type: format });
+    const defaultTitle = activeChapter?.name || tracker.title || (format === 'mp3' ? 'Audio_Export' : 'Video_Export');
+    const title = customTitle || defaultTitle;
+
+    try {
+      if (format === 'mp3') {
+        showToast(t('exportingAudio'));
+        const success = await exportAudioMp3({
+          videoUrl: targetUrl,
+          audioUrl: targetAudioUrl,
+          imageUrl: targetImageUrl,
+          title,
+          onProgress: (pct, msg) => {
+            if (pct === 100) showToast('Audio MP3 listo');
+          }
+        });
+        if (success) {
+          showToast('Descarga de MP3 completada');
+        } else {
+          showToast('Error al extraer audio MP3');
+        }
+      } else {
+        if (isImageWithAudio && targetImageUrl) {
+          showToast(t('synthesizingVideo'));
+          const success = await exportImageWithAudioAsVideo({
+            imageUrl: targetImageUrl,
+            audioUrl: targetAudioUrl,
+            title,
+            onProgress: (pct, msg) => {
+              if (pct === 100) showToast('Video MP4 generado con éxito');
+            }
+          });
+          if (success) {
+            showToast('Video MP4 descargado');
+          } else {
+            showToast('Error al sintetizar video MP4');
+          }
+        } else {
+          showToast(t('exportingVideo'));
+          const success = await exportVideo({
+            videoUrl: targetUrl,
+            imageUrl: targetImageUrl,
+            audioUrl: targetAudioUrl,
+            title,
+            format: 'mp4',
+            onProgress: (pct, msg) => {
+              if (pct === 100) showToast('Video descargado');
+            }
+          });
+          if (success) {
+            showToast('Descarga de video completada');
+          } else {
+            showToast('Error al descargar video');
+          }
+        }
+      }
+    } catch (err) {
+      console.error('Video/Audio export error:', err);
+      showToast('Error durante la exportación de medios');
+    } finally {
+      setGeneratingExport(null);
+    }
+  };
+
   // Single page direct download handler without external redirection
   const handleDownloadSinglePage = async (imgUrl: string, pageNumber: number, chapterName?: string) => {
     const key = `${imgUrl}_${pageNumber}`;
@@ -1268,54 +1431,6 @@ export default function DashboardClient() {
     }
   }, [t, setTrackers]);
 
-  // Exporter for Video / Audio
-  const handleExportVideo = async (
-    tracker: Tracker,
-    format: 'mp4' | 'mp3' = 'mp4',
-    customVideoUrl?: string,
-    customTitle?: string
-  ) => {
-    const videoSource = customVideoUrl || tracker.videoUrl || tracker.url;
-    const title = customTitle || tracker.title || 'video_media';
-
-    if (!videoSource) {
-      showToast('No se encontró URL de video/audio');
-      return;
-    }
-
-    setGeneratingExport({ id: tracker.id, type: format });
-    showToast(`Iniciando descarga directa ${format.toUpperCase()}...`);
-
-    try {
-      if (format === 'mp3') {
-        const success = await exportAudioMp3({
-          videoUrl: videoSource,
-          title
-        });
-        if (success) {
-          showToast('Descarga de Audio MP3 completada');
-        } else {
-          showToast('No se pudo descargar el audio. Intentando enlace directo...');
-        }
-      } else {
-        const success = await exportVideo({
-          videoUrl: videoSource,
-          title
-        });
-        if (success) {
-          showToast('Descarga de Video MP4 completada');
-        } else {
-          showToast('No se pudo descargar el video. Verifica la disponibilidad del flujo.');
-        }
-      }
-    } catch (err) {
-      console.error('Video/Audio export error:', err);
-      showToast('Error en la descarga de video/audio');
-    } finally {
-      setGeneratingExport(null);
-    }
-  };
-
   const addTracker = async () => {
     const cleanUrl = cleanInputUrl(newUrl);
     if (!cleanUrl) return;
@@ -1437,8 +1552,14 @@ export default function DashboardClient() {
   };
 
   return (
-    <div className="min-h-screen p-4 sm:p-8 font-sans text-neutral-100 selection:bg-emerald-500/30 selection:text-white relative">
+    <div className={cn(
+      "min-h-screen p-4 sm:p-8 font-sans selection:bg-emerald-500/30 relative overflow-x-hidden transition-colors duration-300",
+      isLight ? "text-neutral-900 selection:text-neutral-950" : "text-neutral-200 selection:text-white"
+    )}>
       
+      {/* StarOS Atmospheric Nature & Bokeh Ambient Background Layer */}
+      <StarOSAtmosphereBackground />
+
       {/* Global In-App Toast Notification */}
       <AnimatePresence>
         {toastMessage && (
@@ -1446,7 +1567,8 @@ export default function DashboardClient() {
             initial={{ opacity: 0, y: -20, scale: 0.95 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: -20, scale: 0.95 }}
-            className="fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-full bg-neutral-900/95 border border-emerald-500/40 text-emerald-300 text-xs font-semibold shadow-2xl backdrop-blur-md flex items-center gap-2"
+            transition={starosBouncySpring}
+            className="fixed top-5 left-1/2 -translate-x-1/2 z-50 px-4 py-2.5 rounded-full staros-glass-pill border border-emerald-400/50 text-emerald-300 text-xs font-semibold shadow-[0_0_30px_rgba(16,185,129,0.35)] backdrop-blur-2xl flex items-center gap-2"
           >
             <CheckCheck className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>{toastMessage}</span>
@@ -1454,47 +1576,515 @@ export default function DashboardClient() {
         )}
       </AnimatePresence>
 
-      <div className="max-w-5xl mx-auto space-y-8">
+      <div className="max-w-5xl mx-auto space-y-8 relative z-10">
         
-        {/* Header with Title & Action Button */}
-        <header className="flex flex-col items-center justify-center text-center space-y-4 pb-4 border-b border-white/5">
-          <div className="w-full flex justify-center">
-            <TerminalTitle />
-          </div>
+        {/* StarOS Frosted Header: Morphs into Inline Settings when Creating a Task */}
+        <header className="relative w-full pb-6 border-b border-white/10">
+          <AnimatePresence mode="wait">
+            {!showNewModal ? (
+              <motion.div
+                key="default-header"
+                initial={{ opacity: 0, y: -10 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -10 }}
+                transition={starosSpring}
+                className="flex flex-col items-center justify-center text-center space-y-4"
+              >
+                <div className="w-full flex justify-center">
+                  <TerminalTitle />
+                </div>
 
-          <p className="text-xs sm:text-sm text-neutral-400 max-w-xl mx-auto px-4 -mt-1 leading-relaxed">
-            {t('tagline')}
-          </p>
-          
-          <div className="pt-2">
-            <button 
-              id="new-task-button"
-              onClick={openNewTaskModal}
-              className="liquid-glass liquid-button flex items-center gap-2.5 px-6 py-2.5 rounded-full text-white hover:text-emerald-200 transition-all shadow-xl hover:shadow-emerald-500/20 border border-emerald-500/30 cursor-pointer font-medium text-sm"
-            >
-              <Plus className="w-4 h-4 text-emerald-400" />
-              <span>{t('newTask')}</span>
-            </button>
-          </div>
+                <p className="text-xs sm:text-sm text-neutral-300/80 max-w-xl mx-auto px-4 -mt-1 leading-relaxed">
+                  {t('tagline')}
+                </p>
+                
+                <div className="pt-2">
+                  <motion.button 
+                    id="new-task-button"
+                    onClick={openNewTaskModal}
+                    whileHover={{ scale: 1.04, y: -1 }}
+                    whileTap={{ scale: 0.94 }}
+                    transition={starosBouncySpring}
+                    className="relative inline-flex items-center gap-2.5 px-7 py-3 rounded-full text-neutral-950 font-bold text-sm cursor-pointer shadow-[0_0_30px_rgba(16,185,129,0.5)] border border-emerald-400 bg-emerald-400 hover:bg-emerald-300 transition-all overflow-hidden select-none"
+                  >
+                    <span className="pointer-events-none absolute inset-x-0 top-0 h-px bg-white/70" />
+                    <Plus className="w-4 h-4 stroke-[3]" />
+                    <span>{t('newTask')}</span>
+                  </motion.button>
+                </div>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="inline-settings-header"
+                initial={{ opacity: 0, y: -15, scale: 0.98 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: -15, scale: 0.98 }}
+                transition={starosSpring}
+                className="w-full staros-glass rounded-3xl p-5 sm:p-7 border border-white/20 shadow-[0_25px_60px_rgba(0,0,0,0.7),inset_0_1px_2px_rgba(255,255,255,0.25)] space-y-6 text-left"
+              >
+                {/* 1. Header Bar with Title & Close/Cancel Button */}
+                <div className="flex items-center justify-between pb-4 border-b border-white/10">
+                  <div className="flex items-center gap-3">
+                    <div className="w-10 h-10 rounded-2xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 shadow-[0_0_18px_rgba(16,185,129,0.35)] shrink-0">
+                      <Sparkles className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <h2 className="text-base sm:text-lg font-bold text-white tracking-tight">
+                          {t('newTask')}
+                        </h2>
+                        <span className="px-2 py-0.5 rounded-full text-[10px] font-mono staros-glass-pill text-emerald-300 border border-emerald-400/40">
+                          {newCategory.toUpperCase()}
+                        </span>
+                      </div>
+                      <p className="text-xs text-neutral-300/80">
+                        {t('createTaskSubtitle')}
+                      </p>
+                    </div>
+                  </div>
+
+                  <motion.button
+                    type="button"
+                    onClick={closeNewTaskSettings}
+                    whileHover={{ scale: 1.08, rotate: 90 }}
+                    whileTap={{ scale: 0.92 }}
+                    transition={starosSpring}
+                    className="p-2 rounded-full staros-glass-pill text-neutral-400 hover:text-white transition-colors cursor-pointer"
+                    title={t('cancel')}
+                  >
+                    <X className="w-5 h-5" />
+                  </motion.button>
+                </div>
+
+                {/* 2. BARRA DE URL PRIMERAMENTE ARRIBA */}
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-neutral-200 tracking-wide flex items-center gap-2">
+                      <ExternalLink className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{newCategory === 'video' ? 'URL o Enlace del Video' : newCategory === 'image' ? 'URL de la Galería o Imagen' : t('mangaUrl')}</span>
+                    </label>
+                    <span className="text-[11px] text-neutral-400 font-mono">
+                      {newCategory === 'video' ? 'YouTube, Vimeo, MP4...' : newCategory === 'image' ? 'Reddit, Imgur, WebP...' : 'TMO, MangaDex, InManga...'}
+                    </span>
+                  </div>
+
+                  <div className="relative flex items-center w-full rounded-2xl bg-white/[0.06] border border-white/15 focus-within:border-emerald-400/80 focus-within:shadow-[0_0_25px_rgba(16,185,129,0.3)] transition-all overflow-hidden group shadow-inner">
+                    <div className="flex items-center pl-3.5 pr-2.5 py-3 text-emerald-400 font-mono text-sm font-semibold select-none shrink-0 bg-white/[0.04] border-r border-white/10">
+                      <span className="opacity-70 text-neutral-400 mr-0.5">https://</span>
+                    </div>
+
+                    <input
+                      ref={inputRef}
+                      type="text"
+                      value={newUrl}
+                      onChange={handleUrlChange}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && newUrl.trim()) {
+                          addTracker();
+                        }
+                      }}
+                      placeholder={newCategory === 'video' ? 'youtube.com/watch?v=... o url de video' : newCategory === 'image' ? 'reddit.com/gallery/... o url directa' : 'tumangaonline.com/manga/... o lector'}
+                      className="w-full bg-transparent px-3.5 py-3 text-sm text-white placeholder-neutral-500 font-mono focus:outline-none"
+                    />
+
+                    {/* Quick Paste or Clear Buttons */}
+                    <div className="flex items-center pr-2 shrink-0 gap-1.5">
+                      <AnimatePresence mode="wait">
+                        {!newUrl ? (
+                          <motion.button
+                            key="paste-btn"
+                            type="button"
+                            initial={{ opacity: 0, scale: 0.85 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.85 }}
+                            whileHover={{ scale: 1.05 }}
+                            whileTap={{ scale: 0.95 }}
+                            transition={starosSpring}
+                            onClick={handlePasteUrl}
+                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 hover:text-white border border-emerald-400/40 text-xs font-medium cursor-pointer transition-all shadow-[0_0_10px_rgba(16,185,129,0.2)]"
+                            title={t('paste')}
+                          >
+                            <Clipboard className="w-3.5 h-3.5" />
+                            <span>{t('paste')}</span>
+                          </motion.button>
+                        ) : (
+                          <motion.button
+                            key="clear-btn"
+                            type="button"
+                            initial={{ opacity: 0, scale: 0.85 }}
+                            animate={{ opacity: 1, scale: 1 }}
+                            exit={{ opacity: 0, scale: 0.85 }}
+                            whileHover={{ scale: 1.1 }}
+                            whileTap={{ scale: 0.9 }}
+                            transition={starosSpring}
+                            onClick={handleClearUrl}
+                            className="p-1.5 rounded-full bg-white/10 hover:bg-red-500/25 text-neutral-300 hover:text-red-300 border border-white/10 hover:border-red-500/40 text-xs transition-all cursor-pointer shadow-sm"
+                            title={t('clear')}
+                          >
+                            <X className="w-4 h-4" />
+                          </motion.button>
+                        )}
+                      </AnimatePresence>
+                    </div>
+                  </div>
+                </div>
+
+                {/* 3. CATEGORÍAS EN FILA: PÍLDORAS HORIZONTALES DELGADAS */}
+                <div className="space-y-2.5 pt-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-neutral-200 tracking-wide flex items-center gap-2">
+                      <SlidersHorizontal className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{t('searchCategory')}</span>
+                    </label>
+                    <span className="text-[11px] text-neutral-400 font-mono">
+                      {newCategory === 'manga' ? 'Manga / Cómic' : newCategory === 'video' ? 'Video / Audio' : 'Imagen / Galería'}
+                    </span>
+                  </div>
+
+                  {/* Fila de píldoras horizontales delgadas para las categorías */}
+                  <div className="flex items-center gap-2">
+                    {/* Manga Pill */}
+                    <motion.button
+                      id="category-manga-pill"
+                      type="button"
+                      onClick={() => {
+                        setNewCategory('manga');
+                        showToast('Categoría: Manga');
+                      }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.97 }}
+                      transition={starosSpring}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
+                        newCategory === 'manga'
+                          ? (isLight 
+                              ? "bg-emerald-500/20 border-emerald-600 text-emerald-900 shadow-sm ring-1 ring-emerald-500/30" 
+                              : "bg-emerald-500/20 border-emerald-400 text-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.3)]")
+                          : (isLight 
+                              ? "bg-black/[0.04] border-black/10 text-neutral-600 hover:text-neutral-900 hover:border-black/20" 
+                              : "staros-glass-pill border-white/10 text-neutral-400 hover:text-white hover:border-white/20")
+                      )}
+                    >
+                      <BookOpen className={cn("w-3.5 h-3.5 shrink-0", newCategory === 'manga' ? (isLight ? "text-emerald-700" : "text-emerald-400") : "text-neutral-400")} />
+                      <span className="truncate">Manga</span>
+                      <span className={cn(
+                        "text-[10px] font-mono px-1.5 py-0.2 rounded-full border shrink-0 hidden sm:inline",
+                        newCategory === 'manga'
+                          ? (isLight ? "bg-emerald-500/30 border-emerald-600/40 text-emerald-950" : "bg-emerald-500/30 border-emerald-400/40 text-emerald-200")
+                          : (isLight ? "bg-black/5 border-black/10 text-neutral-500" : "bg-white/5 border-white/10 text-neutral-500")
+                      )}>
+                        PDF
+                      </span>
+                    </motion.button>
+
+                    {/* Video Pill */}
+                    <motion.button
+                      id="category-video-pill"
+                      type="button"
+                      onClick={() => {
+                        setNewCategory('video');
+                        showToast('Categoría: Video');
+                      }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.97 }}
+                      transition={starosSpring}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
+                        newCategory === 'video'
+                          ? (isLight 
+                              ? "bg-red-500/20 border-red-600 text-red-900 shadow-sm ring-1 ring-red-500/30" 
+                              : "bg-red-500/20 border-red-400 text-red-300 shadow-[0_0_12px_rgba(239,68,68,0.3)]")
+                          : (isLight 
+                              ? "bg-black/[0.04] border-black/10 text-neutral-600 hover:text-neutral-900 hover:border-black/20" 
+                              : "staros-glass-pill border-white/10 text-neutral-400 hover:text-white hover:border-white/20")
+                      )}
+                    >
+                      <VideoIcon className={cn("w-3.5 h-3.5 shrink-0", newCategory === 'video' ? (isLight ? "text-red-700" : "text-red-400") : "text-neutral-400")} />
+                      <span className="truncate">Video</span>
+                      <span className={cn(
+                        "text-[10px] font-mono px-1.5 py-0.2 rounded-full border shrink-0 hidden sm:inline",
+                        newCategory === 'video'
+                          ? (isLight ? "bg-red-500/30 border-red-600/40 text-red-950" : "bg-red-500/30 border-red-400/40 text-red-200")
+                          : (isLight ? "bg-black/5 border-black/10 text-neutral-500" : "bg-white/5 border-white/10 text-neutral-500")
+                      )}>
+                        MP4
+                      </span>
+                    </motion.button>
+
+                    {/* Imagen Pill */}
+                    <motion.button
+                      id="category-image-pill"
+                      type="button"
+                      onClick={() => {
+                        setNewCategory('image');
+                        showToast('Categoría: Imagen');
+                      }}
+                      whileHover={{ scale: 1.02 }}
+                      whileTap={{ scale: 0.97 }}
+                      transition={starosSpring}
+                      className={cn(
+                        "flex-1 flex items-center justify-center gap-2 py-2 px-3 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
+                        newCategory === 'image'
+                          ? (isLight 
+                              ? "bg-blue-500/20 border-blue-600 text-blue-900 shadow-sm ring-1 ring-blue-500/30" 
+                              : "bg-blue-500/20 border-blue-400 text-blue-300 shadow-[0_0_12px_rgba(59,130,246,0.3)]")
+                          : (isLight 
+                              ? "bg-black/[0.04] border-black/10 text-neutral-600 hover:text-neutral-900 hover:border-black/20" 
+                              : "staros-glass-pill border-white/10 text-neutral-400 hover:text-white hover:border-white/20")
+                      )}
+                    >
+                      <ImageIcon className={cn("w-3.5 h-3.5 shrink-0", newCategory === 'image' ? (isLight ? "text-blue-700" : "text-blue-400") : "text-neutral-400")} />
+                      <span className="truncate">Imagen</span>
+                      <span className={cn(
+                        "text-[10px] font-mono px-1.5 py-0.2 rounded-full border shrink-0 hidden sm:inline",
+                        newCategory === 'image'
+                          ? (isLight ? "bg-blue-500/30 border-blue-600/40 text-blue-950" : "bg-blue-500/30 border-blue-400/40 text-blue-200")
+                          : (isLight ? "bg-black/5 border-black/10 text-neutral-500" : "bg-white/5 border-white/10 text-neutral-500")
+                      )}>
+                        ZIP
+                      </span>
+                    </motion.button>
+                  </div>
+
+                  {/* Detalle contextual compacto de la categoría */}
+                  {newCategory === 'manga' && (
+                    <div className="p-3 rounded-2xl staros-glass-card border border-emerald-500/25 flex items-center justify-between gap-3">
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <div className="p-1.5 rounded-lg bg-emerald-500/20 text-emerald-400 shrink-0">
+                          <Clock className="w-3.5 h-3.5" />
+                        </div>
+                        <div>
+                          <div className="text-xs font-semibold text-white flex items-center gap-2">
+                            <span>{t('smartWaitMode')}</span>
+                            <span className="px-1.5 py-0.5 rounded-full text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                              {t('antiCrash')}
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-neutral-400 leading-tight">
+                            {t('smartWaitModeDesc')}
+                          </div>
+                        </div>
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => setNewSlowServerMode(prev => !prev)}
+                        className={cn(
+                          "relative inline-flex h-5 w-10 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
+                          newSlowServerMode ? "bg-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.5)]" : "bg-white/20"
+                        )}
+                      >
+                        <span
+                          className={cn(
+                            "pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow transition duration-200 ease-in-out",
+                            newSlowServerMode ? "translate-x-5" : "translate-x-0"
+                          )}
+                        />
+                      </button>
+                    </div>
+                  )}
+
+                  {newCategory === 'video' && (
+                    <div className="p-2.5 rounded-2xl staros-glass-card border border-red-500/25 flex items-center gap-2.5 text-xs text-neutral-300">
+                      <div className="p-1.5 rounded-lg bg-red-500/20 text-red-400 shrink-0">
+                        <VideoIcon className="w-3.5 h-3.5" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-white text-xs">Video & Audio MP4/MP3</div>
+                        <div className="text-[11px] text-neutral-400 leading-tight">Descarga video completo y pista MP3 para reproducir o sincronizar.</div>
+                      </div>
+                    </div>
+                  )}
+
+                  {newCategory === 'image' && (
+                    <div className="p-2.5 rounded-2xl staros-glass-card border border-blue-500/25 flex items-center gap-2.5 text-xs text-neutral-300">
+                      <div className="p-1.5 rounded-lg bg-blue-500/20 text-blue-400 shrink-0">
+                        <ImageIcon className="w-3.5 h-3.5" />
+                      </div>
+                      <div>
+                        <div className="font-semibold text-white text-xs">Galerías e Imágenes WebP/ZIP</div>
+                        <div className="text-[11px] text-neutral-400 leading-tight">Extrae imágenes de alta resolución en empaquetado ZIP o formato WebP.</div>
+                      </div>
+                    </div>
+                  )}
+                </div>
+
+                {/* 4. MODO DE RASTREO EN DISPOSICIÓN VERTICAL: ÚNICA, SECUENCIAL Y CONTINUA */}
+                <div className="space-y-2 pt-1">
+                  <div className="flex items-center justify-between">
+                    <label className="text-xs font-semibold text-neutral-200 tracking-wide flex items-center gap-2">
+                      <Zap className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>{t('trackingMode')}</span>
+                    </label>
+                    <span className="text-[11px] text-neutral-400 font-mono">
+                      {newMode === 'single' ? t('trackOnlyOneSpecified') : newMode === 'sequential' ? t('trackAllOneAfterAnother') : t('trackAllSimultaneously')}
+                    </span>
+                  </div>
+
+                  {/* Lista vertical de cápsulas delgadas */}
+                  <div className="flex flex-col gap-1.5">
+                    {/* 1. Modo Única */}
+                    <motion.button 
+                      id="mode-single-pill"
+                      type="button"
+                      onClick={() => setNewMode('single')}
+                      whileHover={{ scale: 1.01 }}
+                      whileTap={{ scale: 0.98 }}
+                      transition={starosSpring}
+                      className={cn(
+                        "w-full flex items-center justify-between py-2 px-3.5 rounded-xl text-xs font-semibold transition-all cursor-pointer select-none border",
+                        newMode === 'single' 
+                          ? (isLight
+                              ? "bg-emerald-500/20 border-emerald-600 text-emerald-950 shadow-sm ring-1 ring-emerald-500/30"
+                              : "bg-emerald-500/20 border-emerald-400 text-emerald-200 shadow-[0_0_12px_rgba(16,185,129,0.3)]")
+                          : (isLight
+                              ? "bg-black/[0.04] border-black/10 text-neutral-700 hover:text-neutral-950 hover:border-black/20"
+                              : "staros-glass-pill border-white/10 text-neutral-400 hover:text-white hover:border-white/20")
+                      )}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <ArrowDownToLine className={cn("w-3.5 h-3.5 shrink-0", newMode === 'single' ? (isLight ? "text-emerald-700" : "text-emerald-400") : "text-neutral-400")} />
+                        <span className="truncate">{t('modeSingle')}</span>
+                        <span className={cn(
+                          "text-[10px] font-normal opacity-75 hidden sm:inline truncate",
+                          newMode === 'single' ? (isLight ? "text-emerald-900" : "text-emerald-300") : "text-neutral-500"
+                        )}>
+                          • {t('trackOnlyOneSpecified')}
+                        </span>
+                      </div>
+                      <span className={cn(
+                        "w-2 h-2 rounded-full shrink-0 ml-2",
+                        newMode === 'single' 
+                          ? (isLight ? "bg-emerald-600 ring-2 ring-emerald-500/30" : "bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.9)]") 
+                          : (isLight ? "bg-neutral-300" : "bg-white/20")
+                      )} />
+                    </motion.button>
+
+                    {/* 2. Modo Secuencial */}
+                    <motion.button 
+                      id="mode-sequential-pill"
+                      type="button"
+                      onClick={() => setNewMode('sequential')}
+                      whileHover={{ scale: 1.01 }}
+                      whileTap={{ scale: 0.98 }}
+                      transition={starosSpring}
+                      className={cn(
+                        "w-full flex items-center justify-between py-2 px-3.5 rounded-xl text-xs font-semibold transition-all cursor-pointer select-none border",
+                        newMode === 'sequential' 
+                          ? (isLight
+                              ? "bg-blue-500/20 border-blue-600 text-blue-950 shadow-sm ring-1 ring-blue-500/30"
+                              : "bg-blue-500/20 border-blue-400 text-blue-200 shadow-[0_0_12px_rgba(59,130,246,0.3)]")
+                          : (isLight
+                              ? "bg-black/[0.04] border-black/10 text-neutral-700 hover:text-neutral-950 hover:border-black/20"
+                              : "staros-glass-pill border-white/10 text-neutral-400 hover:text-white hover:border-white/20")
+                      )}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <List className={cn("w-3.5 h-3.5 shrink-0", newMode === 'sequential' ? (isLight ? "text-blue-700" : "text-blue-400") : "text-neutral-400")} />
+                        <span className="truncate">{t('modeSequential')}</span>
+                        <span className={cn(
+                          "text-[10px] font-normal opacity-75 hidden sm:inline truncate",
+                          newMode === 'sequential' ? (isLight ? "text-blue-900" : "text-blue-300") : "text-neutral-500"
+                        )}>
+                          • {t('trackAllOneAfterAnother')}
+                        </span>
+                      </div>
+                      <span className={cn(
+                        "w-2 h-2 rounded-full shrink-0 ml-2",
+                        newMode === 'sequential' 
+                          ? (isLight ? "bg-blue-600 ring-2 ring-blue-500/30" : "bg-blue-400 shadow-[0_0_8px_rgba(59,130,246,0.9)]") 
+                          : (isLight ? "bg-neutral-300" : "bg-white/20")
+                      )} />
+                    </motion.button>
+
+                    {/* 3. Modo Continua */}
+                    <motion.button 
+                      id="mode-continuous-pill"
+                      type="button"
+                      onClick={() => setNewMode('continuous')}
+                      whileHover={{ scale: 1.01 }}
+                      whileTap={{ scale: 0.98 }}
+                      transition={starosSpring}
+                      className={cn(
+                        "w-full flex items-center justify-between py-2 px-3.5 rounded-xl text-xs font-semibold transition-all cursor-pointer select-none border",
+                        newMode === 'continuous' 
+                          ? (isLight
+                              ? "bg-amber-500/20 border-amber-600 text-amber-950 shadow-sm ring-1 ring-amber-500/30"
+                              : "bg-amber-500/20 border-amber-400 text-amber-200 shadow-[0_0_12px_rgba(245,158,11,0.3)]")
+                          : (isLight
+                              ? "bg-black/[0.04] border-black/10 text-neutral-700 hover:text-neutral-950 hover:border-black/20"
+                              : "staros-glass-pill border-white/10 text-neutral-400 hover:text-white hover:border-white/20")
+                      )}
+                    >
+                      <div className="flex items-center gap-2.5 min-w-0">
+                        <Zap className={cn("w-3.5 h-3.5 shrink-0", newMode === 'continuous' ? (isLight ? "text-amber-700" : "text-amber-400") : "text-neutral-400")} />
+                        <span className="truncate">{t('modeContinuous')}</span>
+                        <span className={cn(
+                          "text-[10px] font-normal opacity-75 hidden sm:inline truncate",
+                          newMode === 'continuous' ? (isLight ? "text-amber-900" : "text-amber-300") : "text-neutral-500"
+                        )}>
+                          • {t('trackAllSimultaneously')}
+                        </span>
+                      </div>
+                      <span className={cn(
+                        "w-2 h-2 rounded-full shrink-0 ml-2",
+                        newMode === 'continuous' 
+                          ? (isLight ? "bg-amber-600 ring-2 ring-amber-500/30" : "bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.9)]") 
+                          : (isLight ? "bg-neutral-300" : "bg-white/20")
+                      )} />
+                    </motion.button>
+                  </div>
+                </div>
+
+                {/* 5. Bottom Action Controls */}
+                <div className="flex items-center justify-end gap-3 pt-4 border-t border-white/10">
+                  <motion.button 
+                    type="button"
+                    onClick={closeNewTaskSettings}
+                    whileHover={{ scale: 1.04 }}
+                    whileTap={{ scale: 0.95 }}
+                    transition={starosSpring}
+                    className="px-5 py-2.5 rounded-full staros-glass-pill text-neutral-300 hover:text-white text-xs sm:text-sm font-medium transition-colors cursor-pointer select-none"
+                  >
+                    {t('cancel')}
+                  </motion.button>
+                  <motion.button 
+                    id="submit-new-task-btn"
+                    type="button"
+                    onClick={addTracker}
+                    disabled={!newUrl.trim()}
+                    whileHover={!newUrl.trim() ? {} : { scale: 1.04 }}
+                    whileTap={!newUrl.trim() ? {} : { scale: 0.96 }}
+                    transition={starosSpring}
+                    className="px-6 py-2.5 rounded-full text-neutral-950 font-bold text-xs sm:text-sm disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-[0_0_25px_rgba(16,185,129,0.5)] bg-emerald-400 hover:bg-emerald-300 border border-emerald-300 flex items-center gap-2 select-none"
+                  >
+                    <Sparkles className="w-4 h-4 text-neutral-950" />
+                    <span>{t('addTask')}</span>
+                  </motion.button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
         </header>
 
         {/* Tracker List */}
-        <div className="space-y-5">
+        <div className="space-y-6">
           <AnimatePresence mode="popLayout">
             {trackers.length === 0 ? (
               <motion.div 
                 initial={{ opacity: 0, y: 20 }}
                 animate={{ opacity: 1, y: 0 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="liquid-glass rounded-3xl p-10 sm:p-14 text-center border-white/5 shadow-2xl"
+                transition={starosSpring}
+                className="staros-glass-card rounded-3xl p-10 sm:p-14 text-center border-white/[0.18] shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.25),0_20px_50px_rgba(0,0,0,0.5)]"
               >
-                <div className="w-16 h-16 mx-auto mb-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shadow-inner">
+                <div className="w-16 h-16 mx-auto mb-4 rounded-3xl bg-emerald-500/15 border border-emerald-400/30 flex items-center justify-center text-emerald-300 shadow-inner">
                   <BookOpen className="w-8 h-8" />
                 </div>
-                <h3 className="text-lg sm:text-xl font-medium text-white/90 mb-2">
+                <h3 className="text-lg sm:text-xl font-semibold text-white tracking-tight mb-2">
                   {t('noActiveTasks')}
                 </h3>
-                <p className="text-xs sm:text-sm text-neutral-400 max-w-md mx-auto leading-relaxed">
+                <p className="text-xs sm:text-sm text-neutral-300/80 max-w-md mx-auto leading-relaxed">
                   {t('emptyState')}
                 </p>
               </motion.div>
@@ -1507,7 +2097,8 @@ export default function DashboardClient() {
                   initial={{ opacity: 0, scale: 0.96 }}
                   animate={{ opacity: 1, scale: 1 }}
                   exit={{ opacity: 0, scale: 0.96, height: 0 }}
-                  className="liquid-glass rounded-2xl flex flex-col relative overflow-hidden group shadow-xl border border-white/10"
+                  transition={starosSpring}
+                  className="staros-glass-card rounded-3xl flex flex-col relative overflow-hidden group shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.25),0_20px_50px_rgba(0,0,0,0.45)] border border-white/[0.18]"
                 >
                   <div className="p-4 sm:p-6 flex flex-col gap-6 relative z-10">
                     {/* Dynamic progress bar underneath */}
@@ -1652,8 +2243,8 @@ export default function DashboardClient() {
                         {/* Category-Specific Exporters & View Controls */}
                         {(() => {
                           const isManga = !tracker.category || tracker.category === 'manga';
-                          const isVideo = tracker.category === 'video' || tracker.mediaType === 'video';
-                          const isImage = tracker.category === 'image';
+                          const isVideo = tracker.category === 'video' || tracker.mediaType === 'video' || tracker.mediaType === 'image_with_audio' || (tracker.chapters && tracker.chapters.some(c => c.mediaType === 'image_with_audio' || c.mediaType === 'video'));
+                          const isImage = tracker.category === 'image' && !isVideo;
                           const trackerImgs = getTrackerImages(tracker);
                           const totalImgsCount = getTrackerImageCount(tracker);
                           const hasImages = trackerImgs.length > 0 || totalImgsCount > 0;
@@ -1663,27 +2254,33 @@ export default function DashboardClient() {
                             <div className="flex flex-wrap items-center gap-3 ml-auto">
                               {/* RECOVERY BUTTON FOR FAILED CHAPTERS */}
                               {isManga && failedChaptersCount > 0 && (
-                                <button
+                                <motion.button
                                   type="button"
                                   onClick={() => handleRetryFailedChapters(tracker)}
                                   disabled={isBatchDownloading[tracker.id]}
-                                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 shadow-lg transition-all cursor-pointer animate-pulse"
+                                  whileHover={{ scale: 1.04 }}
+                                  whileTap={{ scale: 0.94 }}
+                                  transition={starosSpring}
+                                  className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-full text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-400/40 shadow-[0_0_15px_rgba(245,158,11,0.25)] transition-all cursor-pointer animate-pulse"
                                   title="Reintentar capítulos que no respondieron a tiempo usando el Modo Espera"
                                 >
                                   <RotateCw className="w-3.5 h-3.5" />
                                   <span>Reintentar {failedChaptersCount} Rotos (Modo Espera)</span>
-                                </button>
+                                </motion.button>
                               )}
 
                               {/* SLOW SERVER MODE TOGGLE BUTTON */}
                               {isManga && (
-                                <button
+                                <motion.button
                                   type="button"
                                   onClick={() => toggleSlowServerMode(tracker.id)}
+                                  whileHover={{ scale: 1.04 }}
+                                  whileTap={{ scale: 0.94 }}
+                                  transition={starosSpring}
                                   className={cn(
-                                    "flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium border transition-all cursor-pointer",
+                                    "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium border transition-all cursor-pointer staros-glass-pill",
                                     tracker.slowServerMode ?? true
-                                      ? "bg-emerald-950/40 text-emerald-300 border-emerald-500/40"
+                                      ? "bg-emerald-500/20 text-emerald-300 border-emerald-400/50 shadow-[0_0_15px_rgba(16,185,129,0.25)]"
                                       : "bg-white/5 text-neutral-400 border-white/10 hover:text-white"
                                   )}
                                   title="El Modo Espera previene errores reintentando con pausas cuando el servidor del manga está lento"
@@ -1693,21 +2290,24 @@ export default function DashboardClient() {
                                   <span className={cn("font-bold font-mono text-[11px]", (tracker.slowServerMode ?? true) ? "text-emerald-400" : "text-neutral-400")}>
                                     {(tracker.slowServerMode ?? true) ? 'ACTIVO' : 'OFF'}
                                   </span>
-                                </button>
+                                </motion.button>
                               )}
 
                               {/* 1. MANGA EXPORTERS (PDF pdf-lib, PDF img2pdf, ZIP, CBZ) */}
                               {isManga && (hasImages || tracker.status === 'completed') && (
-                                <div className="relative inline-flex items-center rounded-full bg-emerald-950/50 p-1 border border-emerald-500/30 shadow-lg">
+                                <div className="relative inline-flex items-center rounded-full staros-glass-pill p-1 border border-emerald-400/30 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.2),0_8px_20px_rgba(0,0,0,0.35)]">
                                   {/* Modo 1: pdf-lib */}
-                                  <button
+                                  <motion.button
                                     id={`export-pdflib-${tracker.id}`}
                                     onClick={() => handleExportPdf(tracker, 'pdflib')}
                                     disabled={generatingPdf?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingPdf?.id === tracker.id && generatingPdf.engine === 'pdflib'
-                                        ? "bg-emerald-500 text-black font-bold animate-pulse"
+                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
                                         : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
                                     )}
                                     title={t('pdfLibDescription')}
@@ -1718,19 +2318,22 @@ export default function DashboardClient() {
                                         ? t('generatingPdfLib') 
                                         : t('exportPdfPdfLib')}
                                     </span>
-                                  </button>
+                                  </motion.button>
 
-                                  <div className="w-px h-4 bg-emerald-500/25 mx-0.5" />
+                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
 
                                   {/* Modo 2: img2pdf */}
-                                  <button
+                                  <motion.button
                                     id={`export-img2pdf-${tracker.id}`}
                                     onClick={() => handleExportPdf(tracker, 'img2pdf')}
                                     disabled={generatingPdf?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingPdf?.id === tracker.id && generatingPdf.engine === 'img2pdf'
-                                        ? "bg-emerald-400 text-black font-bold animate-pulse"
+                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
                                         : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
                                     )}
                                     title={t('img2PdfDescription')}
@@ -1741,164 +2344,211 @@ export default function DashboardClient() {
                                         ? t('generatingImg2Pdf') 
                                         : t('exportPdfImg2Pdf')}
                                     </span>
-                                  </button>
+                                  </motion.button>
 
-                                  <div className="w-px h-4 bg-emerald-500/25 mx-0.5" />
+                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
 
                                   {/* ZIP */}
-                                  <button
+                                  <motion.button
                                     id={`export-zip-${tracker.id}`}
                                     onClick={() => handleExportImagePackage(tracker, 'original', 'zip')}
                                     disabled={generatingExport?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingExport?.id === tracker.id && generatingExport.type === 'zip_original'
-                                        ? "bg-emerald-500 text-black font-bold animate-pulse"
+                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
                                         : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
                                     )}
                                     title={t('exportImageZip')}
                                   >
                                     <Archive className="w-3.5 h-3.5 text-emerald-400" />
                                     <span>ZIP</span>
-                                  </button>
+                                  </motion.button>
 
-                                  <div className="w-px h-4 bg-emerald-500/25 mx-0.5" />
+                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
 
                                   {/* CBZ */}
-                                  <button
+                                  <motion.button
                                     id={`export-cbz-${tracker.id}`}
                                     onClick={() => handleExportImagePackage(tracker, 'original', 'cbz')}
                                     disabled={generatingExport?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingExport?.id === tracker.id && generatingExport.type === 'cbz_original'
-                                        ? "bg-emerald-400 text-black font-bold animate-pulse"
+                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
                                         : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
                                     )}
                                     title={t('exportImageCbz')}
                                   >
                                     <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
                                     <span>CBZ</span>
-                                  </button>
+                                  </motion.button>
                                 </div>
                               )}
 
-                              {/* 2. VIDEO EXPORTERS (MP4, MP3) */}
-                              {isVideo && (
-                                <div className="relative inline-flex items-center rounded-full bg-red-950/50 p-1 border border-red-500/30 shadow-lg">
-                                  <button
+                              {/* 2. VIDEO EXPORTERS (MP4, MP3, VINCULAR AUDIO) */}
+                              {(isVideo || tracker.url?.includes('instagram.com') || tracker.url?.includes('instagr.am') || tracker.audioUrl) && (
+                                <div className="relative inline-flex items-center rounded-full staros-glass-pill p-1 border border-red-400/30 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.2),0_8px_20px_rgba(0,0,0,0.35)]">
+                                  <motion.button
                                     id={`export-video-mp4-${tracker.id}`}
                                     onClick={() => handleExportVideo(tracker, 'mp4')}
                                     disabled={generatingExport?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingExport?.id === tracker.id && generatingExport.type === 'mp4'
-                                        ? "bg-red-500 text-white font-bold animate-pulse"
+                                        ? "bg-red-500 text-white font-bold shadow-[0_0_15px_rgba(239,68,68,0.5)] animate-pulse"
                                         : "text-red-300 hover:bg-red-500/20 hover:text-white"
                                     )}
                                     title={t('exportVideoMp4')}
                                   >
                                     <VideoIcon className="w-3.5 h-3.5 text-red-400" />
                                     <span>MP4 Video</span>
-                                  </button>
+                                  </motion.button>
 
-                                  <div className="w-px h-4 bg-red-500/25 mx-0.5" />
+                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
 
-                                  <button
+                                  <motion.button
                                     id={`export-audio-mp3-${tracker.id}`}
                                     onClick={() => handleExportVideo(tracker, 'mp3')}
                                     disabled={generatingExport?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingExport?.id === tracker.id && generatingExport.type === 'mp3'
-                                        ? "bg-red-400 text-black font-bold animate-pulse"
+                                        ? "bg-red-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(239,68,68,0.5)] animate-pulse"
                                         : "text-red-300 hover:bg-red-500/20 hover:text-white"
                                     )}
                                     title={t('exportAudioMp3')}
                                   >
                                     <Music className="w-3.5 h-3.5 text-red-400" />
                                     <span>MP3 Audio</span>
-                                  </button>
+                                  </motion.button>
+
+                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
+
+                                  <motion.button
+                                    id={`link-audio-${tracker.id}`}
+                                    onClick={() => setAudioModalData({ isOpen: true, tracker, chapter: null })}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
+                                    className={cn(
+                                      "flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
+                                      tracker.audioUrl
+                                        ? "bg-emerald-500/30 text-emerald-300 hover:bg-emerald-500/40 shadow-[0_0_12px_rgba(16,185,129,0.3)]"
+                                        : "text-amber-300 hover:bg-amber-500/20 hover:text-white"
+                                    )}
+                                    title="Vincular o buscar pista de audio (MP3 o banda sonora)"
+                                  >
+                                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                                    <span>{tracker.audioUrl ? 'Audio OK' : 'Vincular Audio'}</span>
+                                  </motion.button>
                                 </div>
                               )}
 
                               {/* 3. IMAGE EXPORTERS (ZIP, WebP, PNG, JPG) */}
                               {isImage && (hasImages || tracker.status === 'completed') && (
-                                <div className="relative inline-flex items-center rounded-full bg-blue-950/50 p-1 border border-blue-500/30 shadow-lg">
-                                  <button
+                                <div className="relative inline-flex items-center rounded-full staros-glass-pill p-1 border border-blue-400/30 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.2),0_8px_20px_rgba(0,0,0,0.35)]">
+                                  <motion.button
                                     id={`export-img-zip-${tracker.id}`}
                                     onClick={() => handleExportImagePackage(tracker, 'original', 'zip')}
                                     disabled={generatingExport?.id === tracker.id}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
                                       generatingExport?.id === tracker.id && generatingExport.type === 'zip_original'
-                                        ? "bg-blue-500 text-white font-bold animate-pulse"
+                                        ? "bg-blue-500 text-white font-bold shadow-[0_0_15px_rgba(59,130,246,0.5)] animate-pulse"
                                         : "text-blue-300 hover:bg-blue-500/20 hover:text-white"
                                     )}
                                     title={t('exportImageZip')}
                                   >
                                     <Archive className="w-3.5 h-3.5 text-blue-400" />
                                     <span>ZIP HD</span>
-                                  </button>
+                                  </motion.button>
 
-                                  <div className="w-px h-4 bg-blue-500/25 mx-0.5" />
+                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
 
-                                  <button
+                                  <motion.button
                                     id={`export-img-webp-${tracker.id}`}
                                     onClick={() => handleExportImagePackage(tracker, 'webp', 'zip')}
                                     disabled={generatingExport?.id === tracker.id}
-                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium text-blue-300 hover:bg-blue-500/20 hover:text-white transition-all cursor-pointer"
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
+                                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full text-xs font-medium text-blue-300 hover:bg-blue-500/20 hover:text-white transition-all cursor-pointer select-none"
                                     title="WebP Package"
                                   >
                                     <span>WebP</span>
-                                  </button>
+                                  </motion.button>
                                 </div>
                               )}
 
                               {/* View Toggle Buttons */}
                               {(hasImages || (tracker.chapters && tracker.chapters.length > 0)) && (
-                                <div className="flex bg-black/40 rounded-full p-1 border border-white/10 backdrop-blur-md">
-                                  <button
+                                <div className="flex staros-glass-pill rounded-full p-1 border border-white/20 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.2),0_6px_20px_rgba(0,0,0,0.35)]">
+                                  <motion.button
                                     id={`preview-view-${tracker.id}`}
                                     onClick={() => toggleView(tracker.id, 'preview')}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer select-none",
                                       expandedViews[tracker.id] === 'preview' 
-                                        ? "bg-white/20 text-white shadow-inner font-semibold" 
-                                        : "text-neutral-400 hover:text-white hover:bg-white/10"
+                                        ? "bg-white/25 text-white shadow-inner font-semibold border border-white/30" 
+                                        : "text-neutral-300 hover:text-white hover:bg-white/10"
                                     )}
                                   >
                                     <LayoutGrid className="w-3.5 h-3.5" />
                                     {t('previewView')}
-                                  </button>
-                                  <button
+                                  </motion.button>
+                                  <motion.button
                                     id={`full-view-${tracker.id}`}
                                     onClick={() => toggleView(tracker.id, 'full')}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.94 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer",
+                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-all cursor-pointer select-none",
                                       expandedViews[tracker.id] === 'full' 
-                                        ? "bg-white/20 text-white shadow-inner font-semibold" 
-                                        : "text-neutral-400 hover:text-white hover:bg-white/10"
+                                        ? "bg-white/25 text-white shadow-inner font-semibold border border-white/30" 
+                                        : "text-neutral-300 hover:text-white hover:bg-white/10"
                                     )}
                                   >
                                     <Maximize2 className="w-3.5 h-3.5" />
                                     {t('fullView')}
-                                  </button>
+                                  </motion.button>
                                 </div>
                               )}
 
                               {/* Standard Controls: Custom Batch Panel (Manga only) / Play / Pause / Restart / Stop / Delete */}
-                              <div className="flex items-center gap-1.5 bg-black/40 p-1 rounded-full border border-white/10 backdrop-blur-md">
+                              <div className="flex items-center gap-1.5 staros-glass-pill p-1 rounded-full border border-white/20 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.2),0_6px_20px_rgba(0,0,0,0.35)]">
                                 {/* Custom Download & Selection Sub-Panel Toggle Button ONLY for Manga */}
                                 {isManga && (
-                                  <button 
+                                  <motion.button 
                                     onClick={() => toggleCustomPanel(tracker.id)} 
+                                    whileHover={{ scale: 1.15 }}
+                                    whileTap={{ scale: 0.88 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "p-1.5 rounded-full transition-all cursor-pointer relative",
+                                      "p-1.5 rounded-full transition-all cursor-pointer relative select-none",
                                       openCustomPanels[tracker.id]
-                                        ? "bg-emerald-500 text-black shadow-md"
+                                        ? "bg-emerald-400 text-neutral-950 shadow-[0_0_12px_rgba(16,185,129,0.5)]"
                                         : Object.values(selectedChapters[tracker.id] || {}).some(Boolean)
-                                        ? "bg-emerald-500/25 text-emerald-300 ring-1 ring-emerald-500/40 hover:bg-emerald-500/35"
+                                        ? "bg-emerald-500/25 text-emerald-300 ring-1 ring-emerald-400/50 hover:bg-emerald-500/35 shadow-[0_0_10px_rgba(16,185,129,0.3)]"
                                         : "hover:bg-white/15 text-neutral-300 hover:text-white"
                                     )}
                                     title={t('manageSelectionAndDownload')}
@@ -1909,52 +2559,67 @@ export default function DashboardClient() {
                                         {Object.values(selectedChapters[tracker.id] || {}).filter(Boolean).length}
                                       </span>
                                     )}
-                                  </button>
+                                  </motion.button>
                                 )}
 
                                 {tracker.status === 'completed' && (
-                                  <button 
+                                  <motion.button 
                                     onClick={() => restartTracker(tracker.id)} 
-                                    className="p-1.5 rounded-full hover:bg-white/15 text-neutral-300 hover:text-white transition-colors cursor-pointer" 
+                                    whileHover={{ scale: 1.15 }}
+                                    whileTap={{ scale: 0.88 }}
+                                    transition={starosSpring}
+                                    className="p-1.5 rounded-full hover:bg-white/15 text-neutral-300 hover:text-white transition-colors cursor-pointer select-none" 
                                     title={t('restart')}
                                   >
                                     <RotateCw className="w-3.5 h-3.5" />
-                                  </button>
+                                  </motion.button>
                                 )}
                                 {tracker.status !== 'running' && tracker.status !== 'completed' && (
-                                  <button 
+                                  <motion.button 
                                     onClick={() => resumeTracker(tracker.id)} 
-                                    className="p-1.5 rounded-full hover:bg-emerald-500/20 text-emerald-400 transition-colors cursor-pointer"
+                                    whileHover={{ scale: 1.15 }}
+                                    whileTap={{ scale: 0.88 }}
+                                    transition={starosSpring}
+                                    className="p-1.5 rounded-full hover:bg-emerald-500/20 text-emerald-400 transition-colors cursor-pointer select-none"
                                     title={t('resume')}
                                   >
                                     <Play className="w-3.5 h-3.5 fill-current" />
-                                  </button>
+                                  </motion.button>
                                 )}
                                 {tracker.status === 'running' && (
-                                  <button 
+                                  <motion.button 
                                     onClick={() => pauseTracker(tracker.id)} 
-                                    className="p-1.5 rounded-full hover:bg-amber-500/20 text-amber-400 transition-colors cursor-pointer"
+                                    whileHover={{ scale: 1.15 }}
+                                    whileTap={{ scale: 0.88 }}
+                                    transition={starosSpring}
+                                    className="p-1.5 rounded-full hover:bg-amber-500/20 text-amber-400 transition-colors cursor-pointer select-none"
                                     title={t('pause')}
                                   >
                                     <Pause className="w-3.5 h-3.5 fill-current" />
-                                  </button>
+                                  </motion.button>
                                 )}
                                 {(tracker.status === 'running' || tracker.status === 'paused') && (
-                                  <button 
+                                  <motion.button 
                                     onClick={() => stopTracker(tracker.id)} 
-                                    className="p-1.5 rounded-full hover:bg-white/15 text-neutral-300 hover:text-white transition-colors cursor-pointer"
+                                    whileHover={{ scale: 1.15 }}
+                                    whileTap={{ scale: 0.88 }}
+                                    transition={starosSpring}
+                                    className="p-1.5 rounded-full hover:bg-white/15 text-neutral-300 hover:text-white transition-colors cursor-pointer select-none"
                                     title={t('stop')}
                                   >
                                     <Square className="w-3.5 h-3.5 fill-current" />
-                                  </button>
+                                  </motion.button>
                                 )}
-                                <button 
+                                <motion.button 
                                   onClick={() => removeTracker(tracker.id)} 
-                                  className="p-1.5 rounded-full hover:bg-red-500/20 text-neutral-400 hover:text-red-400 transition-colors cursor-pointer"
+                                  whileHover={{ scale: 1.15 }}
+                                  whileTap={{ scale: 0.88 }}
+                                  transition={starosSpring}
+                                  className="p-1.5 rounded-full hover:bg-red-500/20 text-neutral-400 hover:text-red-400 transition-colors cursor-pointer select-none"
                                   title={t('delete')}
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
-                                </button>
+                                </motion.button>
                               </div>
                             </div>
                           );
@@ -1970,14 +2635,14 @@ export default function DashboardClient() {
                         initial={{ height: 0, opacity: 0 }}
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
-                        transition={{ duration: 0.25, ease: 'easeInOut' }}
-                        className="border-t border-emerald-500/30 bg-gradient-to-b from-emerald-950/30 via-neutral-950/90 to-black/90 backdrop-blur-xl overflow-hidden"
+                        transition={starosSpring}
+                        className="border-t border-white/10 staros-glass overflow-hidden shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.15)]"
                       >
                         <div className="p-4 sm:p-5 space-y-4">
                           {/* Sub-Panel Header */}
                           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
                             <div className="flex items-center gap-2.5">
-                              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 shrink-0">
+                              <div className="w-8 h-8 rounded-xl bg-emerald-500/20 border border-emerald-400/40 flex items-center justify-center text-emerald-400 shrink-0 shadow-[0_0_12px_rgba(16,185,129,0.3)]">
                                 <SlidersHorizontal className="w-4 h-4" />
                               </div>
                               <div>
@@ -1985,7 +2650,7 @@ export default function DashboardClient() {
                                   <h4 className="text-sm font-semibold text-white tracking-wide">
                                     {t('customDownload')} (Manga)
                                   </h4>
-                                  <span className="px-2 py-0.5 rounded-full text-[11px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                  <span className="px-2 py-0.5 rounded-full text-[11px] font-mono staros-glass-pill text-emerald-300 border border-emerald-400/40 shadow-[0_0_10px_rgba(16,185,129,0.2)]">
                                     {Object.values(selectedChapters[tracker.id] || {}).filter(Boolean).length} / {tracker.chapters?.length || 1} {t('selectedCount')}
                                   </span>
                                 </div>
@@ -1997,87 +2662,105 @@ export default function DashboardClient() {
 
                             <div className="flex items-center gap-2">
                               {/* Bulk selection shortcuts */}
-                              <div className="flex items-center gap-1.5">
-                                <button
+                              <div className="flex items-center gap-1.5 staros-glass-pill p-1 rounded-full border border-white/15">
+                                <motion.button
                                   type="button"
                                   onClick={() => selectAllInTracker(tracker)}
-                                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-neutral-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all cursor-pointer"
+                                  whileHover={{ scale: 1.05 }}
+                                  whileTap={{ scale: 0.94 }}
+                                  transition={starosSpring}
+                                  className="px-3 py-1 rounded-full text-xs font-medium text-neutral-300 hover:text-white hover:bg-white/15 transition-all cursor-pointer select-none"
                                 >
                                   {t('selectAll')}
-                                </button>
-                                <button
+                                </motion.button>
+                                <motion.button
                                   type="button"
                                   onClick={() => deselectAllInTracker(tracker)}
-                                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-neutral-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all cursor-pointer"
+                                  whileHover={{ scale: 1.05 }}
+                                  whileTap={{ scale: 0.94 }}
+                                  transition={starosSpring}
+                                  className="px-3 py-1 rounded-full text-xs font-medium text-neutral-300 hover:text-white hover:bg-white/15 transition-all cursor-pointer select-none"
                                 >
                                   {t('deselectAll')}
-                                </button>
-                                <button
+                                </motion.button>
+                                <motion.button
                                   type="button"
                                   onClick={() => invertSelectionInTracker(tracker)}
-                                  className="px-2.5 py-1 rounded-lg text-xs font-medium text-neutral-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 transition-all cursor-pointer"
+                                  whileHover={{ scale: 1.05 }}
+                                  whileTap={{ scale: 0.94 }}
+                                  transition={starosSpring}
+                                  className="px-3 py-1 rounded-full text-xs font-medium text-neutral-300 hover:text-white hover:bg-white/15 transition-all cursor-pointer select-none"
                                 >
                                   {t('invertSelection')}
-                                </button>
+                                </motion.button>
                               </div>
 
-                              <button
+                              <motion.button
                                 type="button"
                                 onClick={() => toggleCustomPanel(tracker.id)}
-                                className="p-1.5 rounded-lg text-neutral-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer ml-1"
+                                whileHover={{ scale: 1.12 }}
+                                whileTap={{ scale: 0.9 }}
+                                transition={starosSpring}
+                                className="p-1.5 rounded-full staros-glass-pill text-neutral-400 hover:text-white hover:bg-white/15 transition-colors cursor-pointer ml-1 select-none"
                                 title={t('closeSelectionPanel')}
                               >
                                 <X className="w-4 h-4" />
-                              </button>
+                              </motion.button>
                             </div>
                           </div>
 
                           {/* Presets Grid for Manga Chapters */}
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                             {/* Primeros a la vez */}
-                            <div className="p-3 rounded-xl bg-black/40 border border-white/5 space-y-2">
+                            <div className="p-3.5 rounded-2xl staros-glass-card space-y-2">
                               <div className="text-[11px] font-medium text-neutral-400 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block" />
+                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
                                 <span>{t('firstN')} {t('atOnce')}:</span>
                               </div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 {[10, 20, 30, 40, 50].map((qty) => (
-                                  <button
+                                  <motion.button
                                     key={`first-${qty}`}
                                     type="button"
                                     onClick={() => selectFirstNChapters(tracker, qty)}
-                                    className="px-2.5 py-1 rounded-lg text-xs font-mono bg-white/5 hover:bg-emerald-500/20 text-neutral-300 hover:text-emerald-300 border border-white/10 hover:border-emerald-500/30 transition-all cursor-pointer"
+                                    whileHover={{ scale: 1.08 }}
+                                    whileTap={{ scale: 0.92 }}
+                                    transition={starosSpring}
+                                    className="px-2.5 py-1 rounded-full text-xs font-mono staros-glass-pill text-neutral-300 hover:text-emerald-300 hover:border-emerald-400/50 transition-all cursor-pointer select-none"
                                   >
                                     {qty}
-                                  </button>
+                                  </motion.button>
                                 ))}
                               </div>
                             </div>
 
                             {/* Últimos a la vez */}
-                            <div className="p-3 rounded-xl bg-black/40 border border-white/5 space-y-2">
+                            <div className="p-3.5 rounded-2xl staros-glass-card space-y-2">
                               <div className="text-[11px] font-medium text-neutral-400 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block" />
+                                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block shadow-[0_0_6px_rgba(59,130,246,0.8)]" />
                                 <span>{t('lastN')} {t('atOnce')}:</span>
                               </div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 {[10, 20, 30, 40, 50].map((qty) => (
-                                  <button
+                                  <motion.button
                                     key={`last-${qty}`}
                                     type="button"
                                     onClick={() => selectLastNChapters(tracker, qty)}
-                                    className="px-2.5 py-1 rounded-lg text-xs font-mono bg-white/5 hover:bg-blue-500/20 text-neutral-300 hover:text-blue-300 border border-white/10 hover:border-blue-500/30 transition-all cursor-pointer"
+                                    whileHover={{ scale: 1.08 }}
+                                    whileTap={{ scale: 0.92 }}
+                                    transition={starosSpring}
+                                    className="px-2.5 py-1 rounded-full text-xs font-mono staros-glass-pill text-neutral-300 hover:text-blue-300 hover:border-blue-400/50 transition-all cursor-pointer select-none"
                                   >
                                     {qty}
-                                  </button>
+                                  </motion.button>
                                 ))}
                               </div>
                             </div>
 
                             {/* Cantidad Personalizada */}
-                            <div className="p-3 rounded-xl bg-black/40 border border-white/5 space-y-2">
+                            <div className="p-3.5 rounded-2xl staros-glass-card space-y-2">
                               <div className="text-[11px] font-medium text-neutral-400 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-purple-400 inline-block" />
+                                <span className="w-1.5 h-1.5 rounded-full bg-purple-400 inline-block shadow-[0_0_6px_rgba(192,132,252,0.8)]" />
                                 <span>{t('enterQuantity')}:</span>
                               </div>
                               <div className="flex items-center gap-2">
@@ -2088,35 +2771,41 @@ export default function DashboardClient() {
                                   value={customQty[tracker.id] ?? '15'}
                                   onChange={(e) => setCustomQty(prev => ({ ...prev, [tracker.id]: e.target.value }))}
                                   placeholder="15"
-                                  className="w-16 bg-white/10 border border-white/15 rounded-lg px-2.5 py-1 text-xs text-white font-mono text-center focus:outline-none focus:border-emerald-400"
+                                  className="w-16 bg-white/10 border border-white/15 rounded-xl px-2.5 py-1 text-xs text-white font-mono text-center focus:outline-none focus:border-emerald-400 shadow-inner"
                                 />
-                                <div className="flex rounded-lg overflow-hidden border border-white/10">
-                                  <button
+                                <div className="flex rounded-full overflow-hidden border border-white/15 staros-glass-pill p-0.5">
+                                  <motion.button
                                     type="button"
                                     onClick={() => setCustomDir(prev => ({ ...prev, [tracker.id]: 'first' }))}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer",
+                                      "px-3 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer select-none",
                                       (customDir[tracker.id] ?? 'first') === 'first'
-                                        ? "bg-emerald-500/30 text-emerald-300 font-bold"
-                                        : "bg-white/5 text-neutral-400 hover:text-white"
+                                        ? "bg-emerald-500/30 text-emerald-300 font-bold shadow-sm"
+                                        : "text-neutral-400 hover:text-white"
                                     )}
                                   >
                                     {t('firstN')}
-                                  </button>
-                                  <button
+                                  </motion.button>
+                                  <motion.button
                                     type="button"
                                     onClick={() => setCustomDir(prev => ({ ...prev, [tracker.id]: 'last' }))}
+                                    whileHover={{ scale: 1.05 }}
+                                    whileTap={{ scale: 0.95 }}
+                                    transition={starosSpring}
                                     className={cn(
-                                      "px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer",
+                                      "px-3 py-1 rounded-full text-xs font-medium transition-colors cursor-pointer select-none",
                                       customDir[tracker.id] === 'last'
-                                        ? "bg-blue-500/30 text-blue-300 font-bold"
-                                        : "bg-white/5 text-neutral-400 hover:text-white"
+                                        ? "bg-blue-500/30 text-blue-300 font-bold shadow-sm"
+                                        : "text-neutral-400 hover:text-white"
                                     )}
                                   >
                                     {t('lastN')}
-                                  </button>
+                                  </motion.button>
                                 </div>
-                                <button
+                                <motion.button
                                   type="button"
                                   onClick={() => {
                                     const qty = parseInt(customQty[tracker.id] ?? '15', 10) || 10;
@@ -2126,10 +2815,13 @@ export default function DashboardClient() {
                                       selectLastNChapters(tracker, qty);
                                     }
                                   }}
-                                  className="px-3 py-1 rounded-lg text-xs font-semibold bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/40 transition-all cursor-pointer ml-auto"
+                                  whileHover={{ scale: 1.05 }}
+                                  whileTap={{ scale: 0.95 }}
+                                  transition={starosSpring}
+                                  className="px-3.5 py-1.5 rounded-full text-xs font-semibold bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-400/40 shadow-[0_0_12px_rgba(16,185,129,0.25)] transition-all cursor-pointer ml-auto select-none"
                                 >
                                   {t('apply')}
-                                </button>
+                                </motion.button>
                               </div>
                             </div>
                           </div>
@@ -2137,17 +2829,20 @@ export default function DashboardClient() {
                           {/* Action Executions for Selected Manga Chapters */}
                           <div className="pt-2 flex flex-wrap items-center gap-2.5 border-t border-white/10">
                             {/* 1. Download Selected Chapters */}
-                            <button
+                            <motion.button
                               type="button"
                               onClick={() => handleDownloadSelectedChapters(tracker)}
                               disabled={isBatchDownloading[tracker.id] || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
+                              whileHover={!Object.values(selectedChapters[tracker.id] || {}).some(Boolean) ? {} : { scale: 1.04 }}
+                              whileTap={!Object.values(selectedChapters[tracker.id] || {}).some(Boolean) ? {} : { scale: 0.95 }}
+                              transition={starosSpring}
                               className={cn(
-                                "flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer border shadow-lg",
+                                "flex items-center gap-2 px-4 py-2 rounded-full text-xs font-bold transition-all cursor-pointer border shadow-lg select-none",
                                 !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)
                                   ? "bg-white/5 text-neutral-500 border-white/5 cursor-not-allowed"
                                   : isBatchDownloading[tracker.id]
-                                  ? "bg-emerald-500 text-black border-emerald-400 animate-pulse"
-                                  : "bg-gradient-to-r from-emerald-500 to-teal-500 text-black border-emerald-400 hover:brightness-110"
+                                  ? "bg-emerald-400 text-neutral-950 border-emerald-300 shadow-[0_0_18px_rgba(16,185,129,0.5)] animate-pulse"
+                                  : "bg-emerald-400 text-neutral-950 border-emerald-300 shadow-[0_0_20px_rgba(16,185,129,0.4)] hover:brightness-110"
                               )}
                             >
                               <DownloadCloud className={cn("w-4 h-4", isBatchDownloading[tracker.id] && "animate-bounce")} />
@@ -2156,32 +2851,38 @@ export default function DashboardClient() {
                                   ? t('downloading')
                                   : `${t('downloadSelected')} (${Object.values(selectedChapters[tracker.id] || {}).filter(Boolean).length})`}
                               </span>
-                            </button>
+                            </motion.button>
 
                             {/* 2. Combined Volume PDF (pdf-lib) */}
-                            <button
+                            <motion.button
                               type="button"
                               onClick={() => handleExportSelectedCombined(tracker, 'pdflib')}
                               disabled={generatingPdf?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/15 text-white border border-white/10 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.95 }}
+                              transition={starosSpring}
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
                             >
                               <FileText className="w-4 h-4 text-emerald-400" />
                               <span>{t('exportSelectedPdfLib')}</span>
-                            </button>
+                            </motion.button>
 
                             {/* 3. Combined Volume PDF (img2pdf) */}
-                            <button
+                            <motion.button
                               type="button"
                               onClick={() => handleExportSelectedCombined(tracker, 'img2pdf')}
                               disabled={generatingPdf?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/15 text-white border border-white/10 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.95 }}
+                              transition={starosSpring}
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
                             >
                               <Layers className="w-4 h-4 text-emerald-400" />
                               <span>{t('exportSelectedImg2Pdf')}</span>
-                            </button>
+                            </motion.button>
 
                             {/* 4. Export Selected as ZIP Bundle */}
-                            <button
+                            <motion.button
                               type="button"
                               onClick={async () => {
                                 const trackerSel = selectedChapters[tracker.id] || {};
@@ -2197,14 +2898,17 @@ export default function DashboardClient() {
                                 await handleExportImagePackage(tracker, 'original', 'zip', combinedImages, `${tracker.title || 'manga'}_seleccion_zip`);
                               }}
                               disabled={generatingExport?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/15 text-white border border-white/10 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.95 }}
+                              transition={starosSpring}
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
                             >
                               <Archive className="w-4 h-4 text-emerald-400" />
                               <span>ZIP Selección</span>
-                            </button>
+                            </motion.button>
 
                             {/* 5. Export Selected as CBZ Comic Bundle */}
-                            <button
+                            <motion.button
                               type="button"
                               onClick={async () => {
                                 const trackerSel = selectedChapters[tracker.id] || {};
@@ -2220,35 +2924,44 @@ export default function DashboardClient() {
                                 await handleExportImagePackage(tracker, 'original', 'cbz', combinedImages, `${tracker.title || 'manga'}_seleccion_cbz`);
                               }}
                               disabled={generatingExport?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-white/10 hover:bg-white/15 text-white border border-white/10 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.95 }}
+                              transition={starosSpring}
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
                             >
                               <BookOpen className="w-4 h-4 text-emerald-400" />
                               <span>CBZ Selección</span>
-                            </button>
+                            </motion.button>
 
                             {/* 6. Individual Separate Chapter PDFs */}
-                            <button
+                            <motion.button
                               type="button"
                               onClick={() => handleExportSelectedIndividual(tracker, 'img2pdf')}
                               disabled={generatingPdf?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-semibold bg-emerald-950/50 hover:bg-emerald-900/50 text-emerald-300 border border-emerald-500/30 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                              whileHover={{ scale: 1.04 }}
+                              whileTap={{ scale: 0.95 }}
+                              transition={starosSpring}
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-emerald-300 border border-emerald-400/40 hover:border-emerald-400/60 shadow-[0_0_12px_rgba(16,185,129,0.2)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
                               title={t('exportIndividualPdfs')}
                             >
                               <FolderDown className="w-4 h-4 text-emerald-400" />
                               <span>{t('exportIndividualPdfs')}</span>
-                            </button>
+                            </motion.button>
 
                             {/* 7. Reintentar Rotos en Sub-panel */}
                             {((tracker.chapters || []).some(c => c.status === 'error' || ((!c.images || c.images.length === 0) && c.status !== 'downloading' && c.status !== 'pending' && tracker.status === 'completed'))) && (
-                              <button
+                              <motion.button
                                 type="button"
                                 onClick={() => handleRetryFailedChapters(tracker)}
                                 disabled={isBatchDownloading[tracker.id]}
-                                className="flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 transition-all cursor-pointer shadow-lg sm:ml-auto"
+                                whileHover={{ scale: 1.04 }}
+                                whileTap={{ scale: 0.95 }}
+                                transition={starosSpring}
+                                className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-bold bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-400/40 transition-all cursor-pointer shadow-[0_0_15px_rgba(245,158,11,0.25)] sm:ml-auto select-none"
                               >
                                 <RotateCw className="w-4 h-4" />
                                 <span>Reintentar Capítulos Rotos (Modo Espera)</span>
-                              </button>
+                              </motion.button>
                             )}
                           </div>
                         </div>
@@ -2264,7 +2977,7 @@ export default function DashboardClient() {
                         animate={{ height: 'auto', opacity: 1 }}
                         exit={{ height: 0, opacity: 0 }}
                         transition={{ duration: 0.3, ease: 'easeInOut' }}
-                        className="border-t border-white/10 bg-black/50 backdrop-blur-xl"
+                        className="border-t border-white/10 staros-glass"
                       >
                         <div className="p-4 sm:p-6 max-h-[75vh] overflow-y-auto custom-scrollbar">
                           {(() => {
@@ -2283,105 +2996,137 @@ export default function DashboardClient() {
                               <div className="space-y-6">
                                 {/* Quick Jump Navigator */}
                                 {displayChapters.length > 1 && (
-                                  <div className="sticky top-0 z-30 pb-3 mb-2 bg-neutral-950/85 backdrop-blur-md border-b border-white/10 -mx-4 px-4 sm:-mx-6 sm:px-6 pt-1 space-y-3">
+                                  <div className="sticky top-0 z-30 pb-3 mb-2 staros-glass-card staros-glass-specular border-b border-white/10 -mx-4 px-4 sm:-mx-6 sm:px-6 pt-2 space-y-3 shadow-lg">
                                     <div className="flex flex-wrap items-center justify-between gap-3">
                                       <div className="flex items-center gap-2 overflow-x-auto custom-scrollbar py-1 max-w-full">
-                                        <div className="flex items-center gap-1.5 shrink-0 text-xs text-neutral-400 font-semibold uppercase tracking-wider mr-1">
+                                        <div className="flex items-center gap-1.5 shrink-0 text-xs text-neutral-300 font-semibold uppercase tracking-wider mr-1">
                                           <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
                                           <span>{t('chapters')}:</span>
                                         </div>
                                         {displayChapters.map((ch) => (
-                                          <button
+                                          <motion.button
                                             key={ch.id}
                                             type="button"
+                                            whileHover={{ scale: 1.05 }}
+                                            whileTap={{ scale: 0.95 }}
+                                            transition={starosSpring}
                                             onClick={() => {
                                               setCollapsedChapters(prev => ({ ...prev, [`${tracker.id}_${ch.id}`]: false }));
                                               const el = document.getElementById(`chapter-card-${tracker.id}-${ch.id}`);
                                               el?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                                             }}
                                             className={cn(
-                                              "px-2.5 py-1 rounded-lg text-xs font-mono shrink-0 transition-all border cursor-pointer",
+                                              "px-3 py-1 rounded-full text-xs font-mono shrink-0 transition-all border cursor-pointer select-none staros-glass-pill",
                                               ch.status === 'completed'
-                                                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/30"
+                                                ? "bg-emerald-500/15 text-emerald-300 border-emerald-400/40 hover:bg-emerald-500/25 shadow-[0_0_8px_rgba(16,185,129,0.2)]"
                                                 : ch.status === 'downloading'
-                                                ? "bg-blue-500/20 text-blue-300 border-blue-500/40 animate-pulse"
-                                                : "bg-white/5 text-neutral-400 border-white/10 hover:bg-white/10 hover:text-neutral-200"
+                                                ? "bg-blue-500/20 text-blue-300 border-blue-400/40 animate-pulse shadow-[0_0_8px_rgba(59,130,246,0.3)]"
+                                                : "text-neutral-300 border-white/10 hover:text-white hover:bg-white/10"
                                             )}
                                           >
                                             {ch.name} {ch.images && ch.images.length > 0 ? `(${ch.images.length})` : ''}
-                                          </button>
+                                          </motion.button>
                                         ))}
                                       </div>
 
                                       <div className="flex items-center gap-2 shrink-0 ml-auto">
-                                        <button
+                                        <motion.button
                                           type="button"
+                                          whileHover={{ scale: 1.05 }}
+                                          whileTap={{ scale: 0.95 }}
+                                          transition={starosSpring}
                                           onClick={() => toggleCustomPanel(tracker.id)}
-                                          className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] font-semibold text-emerald-300 rounded-lg bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 transition-all cursor-pointer"
+                                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-emerald-300 rounded-full staros-glass-pill border border-emerald-400/40 shadow-[0_0_10px_rgba(16,185,129,0.2)] transition-all cursor-pointer select-none"
                                         >
-                                          <SlidersHorizontal className="w-3 h-3" />
+                                          <SlidersHorizontal className="w-3.5 h-3.5" />
                                           <span>{t('customDownload')}</span>
-                                        </button>
-                                        <button
+                                        </motion.button>
+                                        <motion.button
                                           type="button"
+                                          whileHover={{ scale: 1.05 }}
+                                          whileTap={{ scale: 0.95 }}
+                                          transition={starosSpring}
                                           onClick={() => toggleCollapseAll(tracker, true)}
-                                          className="px-2.5 py-1 text-[11px] font-medium text-neutral-400 hover:text-white rounded-lg bg-white/5 hover:bg-white/10 transition-colors cursor-pointer border border-white/5"
+                                          className="px-3 py-1.5 text-xs font-medium text-neutral-300 hover:text-white rounded-full staros-glass-pill transition-colors cursor-pointer border border-white/10 select-none"
                                         >
                                           {t('collapseAll')}
-                                        </button>
-                                        <button
+                                        </motion.button>
+                                        <motion.button
                                           type="button"
+                                          whileHover={{ scale: 1.05 }}
+                                          whileTap={{ scale: 0.95 }}
+                                          transition={starosSpring}
                                           onClick={() => toggleCollapseAll(tracker, false)}
-                                          className="px-2.5 py-1 text-[11px] font-medium text-neutral-400 hover:text-white rounded-lg bg-white/5 hover:bg-white/10 transition-colors cursor-pointer border border-white/5"
+                                          className="px-3 py-1.5 text-xs font-medium text-neutral-300 hover:text-white rounded-full staros-glass-pill transition-colors cursor-pointer border border-white/10 select-none"
                                         >
                                           {t('expandAll')}
-                                        </button>
+                                        </motion.button>
                                       </div>
                                     </div>
                                   </div>
                                 )}
 
                                 {/* VERTICAL CHAPTER SCROLL */}
-                                <div className="space-y-6">
+                                 <div className="space-y-6">
                                   {displayChapters.map((chapter) => {
                                     const isCollapsed = collapsedChapters[`${tracker.id}_${chapter.id}`] ?? true;
                                     const isSelected = !!selectedChapters[tracker.id]?.[chapter.id];
                                     const chapterImages = chapter.images || [];
+
+                                    const isChapterVideo = tracker.category === 'video' || tracker.mediaType === 'video' || chapter.mediaType === 'video' || chapter.mediaType === 'image_with_audio' || tracker.mediaType === 'image_with_audio' || !!chapter.videoUrl || !!tracker.videoUrl;
+                                    const isChapterImage = (tracker.category === 'image' || chapter.mediaType === 'image') && !isChapterVideo;
+                                    const isChapterManga = !isChapterVideo && !isChapterImage && (!tracker.category || tracker.category === 'manga');
 
                                     return (
                                       <div 
                                         key={chapter.id} 
                                         id={`chapter-card-${tracker.id}-${chapter.id}`}
                                         className={cn(
-                                          "rounded-2xl border transition-all shadow-xl overflow-hidden",
+                                          "rounded-3xl border transition-all shadow-xl overflow-hidden staros-glass-card",
                                           isSelected
-                                            ? "border-emerald-500/50 bg-neutral-950/80 ring-1 ring-emerald-500/20"
-                                            : "border-white/10 bg-neutral-950/60"
+                                            ? "border-emerald-400/60 ring-1 ring-emerald-400/30 shadow-[0_0_20px_rgba(16,185,129,0.2)]"
+                                            : "border-white/15"
                                         )}
                                       >
                                         {/* Chapter Header Card */}
-                                        <div className="p-3.5 sm:p-4 bg-white/[0.04] border-b border-white/10 flex flex-wrap items-center justify-between gap-3">
+                                        <div className="p-3.5 sm:p-4 border-b border-white/10 flex flex-wrap items-center justify-between gap-3 staros-glass-specular">
                                           <div className="flex items-center gap-3 min-w-0">
                                             {/* CHECKBOX SELECTION BUTTON */}
-                                            <button
+                                            <motion.button
                                               type="button"
+                                              whileHover={{ scale: 1.1 }}
+                                              whileTap={{ scale: 0.9 }}
+                                              transition={starosSpring}
                                               onClick={(e) => {
                                                 e.stopPropagation();
                                                 toggleChapterSelect(tracker.id, chapter.id);
                                               }}
                                               className={cn(
-                                                "w-6 h-6 rounded-lg flex items-center justify-center transition-all cursor-pointer border shrink-0",
+                                                "w-6 h-6 rounded-lg flex items-center justify-center transition-all cursor-pointer border shrink-0 select-none",
                                                 isSelected
-                                                  ? "bg-emerald-500 border-emerald-400 text-black shadow-[0_0_10px_rgba(16,185,129,0.4)]"
-                                                  : "bg-white/5 border-white/20 text-transparent hover:border-white/40 hover:bg-white/10"
+                                                  ? "bg-emerald-400 border-emerald-300 text-neutral-950 shadow-[0_0_12px_rgba(16,185,129,0.5)]"
+                                                  : "staros-glass-pill border-white/25 text-transparent hover:border-white/50"
                                               )}
                                               title={isSelected ? t('deselectAll') : t('apply')}
                                             >
-                                              <Check className={cn("w-3.5 h-3.5 stroke-[3]", isSelected ? "text-black" : "text-transparent")} />
-                                            </button>
+                                              <Check className={cn("w-3.5 h-3.5 stroke-[3]", isSelected ? "text-neutral-950" : "text-transparent")} />
+                                            </motion.button>
 
-                                            <div className="w-8 h-8 rounded-xl bg-emerald-500/10 border border-emerald-500/20 flex items-center justify-center text-emerald-400 shrink-0">
-                                              <BookOpen className="w-4 h-4" />
+                                            <div className={cn(
+                                              "w-8 h-8 rounded-xl flex items-center justify-center shrink-0 border",
+                                              isChapterVideo
+                                                ? "bg-red-500/15 border-red-400/30 text-red-400"
+                                                : isChapterImage
+                                                ? "bg-blue-500/15 border-blue-400/30 text-blue-400"
+                                                : "bg-emerald-500/15 border-emerald-400/30 text-emerald-400"
+                                            )}>
+                                              {isChapterVideo ? (
+                                                <VideoIcon className="w-4 h-4" />
+                                              ) : isChapterImage ? (
+                                                <ImageIcon className="w-4 h-4" />
+                                              ) : (
+                                                <BookOpen className="w-4 h-4" />
+                                              )}
                                             </div>
                                              <div className="min-w-0">
                                               <div className="text-sm font-semibold text-white flex items-center gap-2 flex-wrap">
@@ -2392,8 +3137,19 @@ export default function DashboardClient() {
                                                   </span>
                                                 )}
                                                 {chapter.status === 'completed' && (
-                                                  <span className="px-2 py-0.5 rounded-full text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 font-mono">
-                                                    {chapterImages.length} {t('pages')}
+                                                  <span className={cn(
+                                                    "px-2 py-0.5 rounded-full text-[10px] font-mono border",
+                                                    isChapterVideo 
+                                                      ? "bg-red-500/20 text-red-300 border-red-500/30" 
+                                                      : isChapterImage 
+                                                      ? "bg-blue-500/20 text-blue-300 border-blue-500/30" 
+                                                      : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                                                  )}>
+                                                    {isChapterVideo 
+                                                      ? 'Video HD' 
+                                                      : isChapterImage 
+                                                      ? `${chapterImages.length} ${chapterImages.length === 1 ? 'imagen' : 'imágenes'}` 
+                                                      : `${chapterImages.length} ${t('pages')}`}
                                                   </span>
                                                 )}
                                                 {chapter.status === 'pending' && (
@@ -2414,104 +3170,213 @@ export default function DashboardClient() {
                                             </div>
                                           </div>
 
-                                          {/* Chapter Specific Actions: Manga Exporters + Accordion Toggle */}
-                                          <div className="flex items-center gap-2.5 ml-auto">
-                                            {chapterImages.length > 0 && (
-                                              <div className="inline-flex items-center rounded-full bg-emerald-950/40 p-0.5 border border-emerald-500/30">
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleExportPdf(
-                                                    tracker, 
-                                                    'pdflib', 
-                                                    chapterImages, 
-                                                    `${tracker.title || 'manga'}_${chapter.name}`,
-                                                    chapter.id
-                                                  )}
-                                                  disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
-                                                  className={cn(
-                                                    "flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer",
-                                                    generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id && generatingPdf.engine === 'pdflib'
-                                                      ? "bg-emerald-500 text-black font-bold animate-pulse"
-                                                      : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                                  )}
-                                                  title="PDF Vector Stream"
-                                                >
-                                                  <FileText className="w-3 h-3 text-emerald-400" />
-                                                  <span>pdf-lib</span>
-                                                </button>
-                                                <div className="w-px h-3 bg-emerald-500/20" />
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleExportPdf(
-                                                    tracker, 
-                                                    'img2pdf', 
-                                                    chapterImages, 
-                                                    `${tracker.title || 'manga'}_${chapter.name}`,
-                                                    chapter.id
-                                                  )}
-                                                  disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
-                                                  className={cn(
-                                                    "flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer",
-                                                    generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id && generatingPdf.engine === 'img2pdf'
-                                                      ? "bg-emerald-400 text-black font-bold animate-pulse"
-                                                      : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                                  )}
-                                                  title="PDF 1:1 Image Package"
-                                                >
-                                                  <Layers className="w-3 h-3 text-emerald-400" />
-                                                  <span>img2pdf</span>
-                                                </button>
-                                                <div className="w-px h-3 bg-emerald-500/20" />
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleExportImagePackage(
-                                                    tracker,
-                                                    'original',
-                                                    'zip',
-                                                    chapterImages,
-                                                    `${tracker.title || 'manga'}_${chapter.name}`,
-                                                    chapter.id
-                                                  )}
-                                                  disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
-                                                  className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
-                                                  title="ZIP HD Original"
-                                                >
-                                                  <Archive className="w-3 h-3 text-emerald-400" />
-                                                  <span>ZIP</span>
-                                                </button>
-                                                <div className="w-px h-3 bg-emerald-500/20" />
-                                                <button
-                                                  type="button"
-                                                  onClick={() => handleExportImagePackage(
-                                                    tracker,
-                                                    'original',
-                                                    'cbz',
-                                                    chapterImages,
-                                                    `${tracker.title || 'manga'}_${chapter.name}`,
-                                                    chapter.id
-                                                  )}
-                                                  disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
-                                                  className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
-                                                  title="CBZ Lector de Comic"
-                                                >
-                                                  <BookOpen className="w-3 h-3 text-emerald-400" />
-                                                  <span>CBZ</span>
-                                                </button>
-                                              </div>
+                                          {/* Chapter Specific Actions / Capsules */}
+                                          <div className="flex items-center gap-2.5 w-full sm:w-auto sm:ml-auto">
+                                            {/* A. CATEGORÍA MANGA: Opciones pdf-lib, img2pdf, zip, cbz + icono desplegar/minimizar integrado */}
+                                            {isChapterManga && (
+                                              <>
+                                                {chapterImages.length > 0 ? (
+                                                  <div className="inline-flex items-center rounded-full bg-emerald-950/40 p-0.5 border border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleExportPdf(
+                                                        tracker, 
+                                                        'pdflib', 
+                                                        chapterImages, 
+                                                        `${tracker.title || 'manga'}_${chapter.name}`,
+                                                        chapter.id
+                                                      )}
+                                                      disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
+                                                      className={cn(
+                                                        "flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer",
+                                                        generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id && generatingPdf.engine === 'pdflib'
+                                                          ? "bg-emerald-500 text-black font-bold animate-pulse"
+                                                          : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                                      )}
+                                                      title="PDF Vector Stream"
+                                                    >
+                                                      <FileText className="w-3 h-3 text-emerald-400" />
+                                                      <span>pdf-lib</span>
+                                                    </button>
+                                                    <div className="w-px h-3 bg-emerald-500/20" />
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleExportPdf(
+                                                        tracker, 
+                                                        'img2pdf', 
+                                                        chapterImages, 
+                                                        `${tracker.title || 'manga'}_${chapter.name}`,
+                                                        chapter.id
+                                                      )}
+                                                      disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
+                                                      className={cn(
+                                                        "flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer",
+                                                        generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id && generatingPdf.engine === 'img2pdf'
+                                                          ? "bg-emerald-400 text-black font-bold animate-pulse"
+                                                          : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                                      )}
+                                                      title="PDF 1:1 Image Package"
+                                                    >
+                                                      <Layers className="w-3 h-3 text-emerald-400" />
+                                                      <span>img2pdf</span>
+                                                    </button>
+                                                    <div className="w-px h-3 bg-emerald-500/20" />
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleExportImagePackage(
+                                                        tracker,
+                                                        'original',
+                                                        'zip',
+                                                        chapterImages,
+                                                        `${tracker.title || 'manga'}_${chapter.name}`,
+                                                        chapter.id
+                                                      )}
+                                                      disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
+                                                      className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
+                                                      title="ZIP HD Original"
+                                                    >
+                                                      <Archive className="w-3 h-3 text-emerald-400" />
+                                                      <span>ZIP</span>
+                                                    </button>
+                                                    <div className="w-px h-3 bg-emerald-500/20" />
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleExportImagePackage(
+                                                        tracker,
+                                                        'original',
+                                                        'cbz',
+                                                        chapterImages,
+                                                        `${tracker.title || 'manga'}_${chapter.name}`,
+                                                        chapter.id
+                                                      )}
+                                                      disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
+                                                      className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
+                                                      title="CBZ Lector de Comic"
+                                                    >
+                                                      <BookOpen className="w-3 h-3 text-emerald-400" />
+                                                      <span>CBZ</span>
+                                                    </button>
+                                                    <div className="w-px h-3 bg-emerald-500/20" />
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
+                                                      className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
+                                                      title={isCollapsed ? t('expand') : t('collapse')}
+                                                    >
+                                                      <span className="hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
+                                                      {isCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
+                                                    </button>
+                                                  </div>
+                                                ) : (
+                                                  <motion.button
+                                                    type="button"
+                                                    onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
+                                                    whileHover={{ scale: 1.01 }}
+                                                    whileTap={{ scale: 0.98 }}
+                                                    transition={starosSpring}
+                                                    className={cn(
+                                                      "w-full sm:w-auto sm:min-w-[240px] flex items-center justify-between gap-3 py-1.5 px-4 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
+                                                      isCollapsed
+                                                        ? "staros-glass-pill border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 hover:border-emerald-400/50 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
+                                                        : "bg-emerald-500/20 border-emerald-400/50 text-emerald-200 shadow-[0_0_15px_rgba(16,185,129,0.3)]"
+                                                    )}
+                                                  >
+                                                    <div className="flex items-center gap-2 min-w-0">
+                                                      <BookOpen className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                                      <span className="truncate">{isCollapsed ? 'Desplegar Capítulo' : 'Minimizar Capítulo'}</span>
+                                                    </div>
+                                                    <div className="flex items-center gap-1 shrink-0 text-xs font-medium pl-2 border-l border-emerald-500/20">
+                                                      <span className="text-[11px] hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
+                                                      {isCollapsed ? <ChevronDown className="w-4 h-4 text-emerald-400" /> : <ChevronUp className="w-4 h-4 text-emerald-400" />}
+                                                    </div>
+                                                  </motion.button>
+                                                )}
+                                              </>
                                             )}
 
-                                            <button
-                                              type="button"
-                                              onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
-                                              className="p-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-neutral-300 hover:text-white text-xs flex items-center justify-center cursor-pointer transition-colors border border-white/5"
-                                              title={isCollapsed ? t('expand') : t('collapse')}
-                                            >
-                                              {isCollapsed ? (
-                                                <ChevronDown className="w-4 h-4" />
-                                              ) : (
-                                                <ChevronUp className="w-4 h-4" />
-                                              )}
-                                            </button>
+                                            {/* B. CATEGORÍA VIDEO: CÁPSULA ÚNICA LARGA Y DELGADA CON ICONO DE DESPLEGAR Y MINIMIZAR */}
+                                            {isChapterVideo && (
+                                              <motion.button
+                                                type="button"
+                                                onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
+                                                whileHover={{ scale: 1.01 }}
+                                                whileTap={{ scale: 0.98 }}
+                                                transition={starosSpring}
+                                                className={cn(
+                                                  "w-full sm:w-auto sm:min-w-[280px] flex items-center justify-between gap-3 py-1.5 px-4 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
+                                                  isCollapsed
+                                                    ? (isLight
+                                                        ? "bg-red-500/10 border-red-600/25 text-red-900 hover:bg-red-500/20 shadow-sm"
+                                                        : "staros-glass-pill border-red-500/30 text-red-300 hover:bg-red-500/20 hover:border-red-400/50 shadow-[0_0_12px_rgba(239,68,68,0.2)]")
+                                                    : (isLight
+                                                        ? "bg-red-500/20 border-red-600/40 text-red-950 shadow-inner"
+                                                        : "bg-red-500/25 border-red-400/50 text-red-200 shadow-[0_0_15px_rgba(239,68,68,0.3)]")
+                                                )}
+                                                title={isCollapsed ? 'Desplegar reproductor de video' : 'Minimizar reproductor de video'}
+                                              >
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                  <VideoIcon className="w-3.5 h-3.5 text-red-400 shrink-0" />
+                                                  <span className="truncate">
+                                                    {isCollapsed ? 'Desplegar Video y Reproductor' : 'Minimizar Reproductor de Video'}
+                                                  </span>
+                                                  {chapter.videoUrl && (
+                                                    <span className="text-[10px] font-mono opacity-80 px-1.5 py-0.5 rounded-full bg-red-500/20 border border-red-500/30 hidden sm:inline shrink-0">
+                                                      MP4 HD
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                <div className="flex items-center gap-1.5 shrink-0 text-xs font-medium opacity-90 pl-2 border-l border-red-500/20">
+                                                  <span className="text-[11px] hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
+                                                  {isCollapsed ? (
+                                                    <ChevronDown className="w-4 h-4 text-red-400" />
+                                                  ) : (
+                                                    <ChevronUp className="w-4 h-4 text-red-400" />
+                                                  )}
+                                                </div>
+                                              </motion.button>
+                                            )}
+
+                                            {/* C. CATEGORÍA IMAGEN: CÁPSULA ÚNICA LARGA Y DELGADA CON ICONO DE DESPLEGAR Y MINIMIZAR */}
+                                            {isChapterImage && (
+                                              <motion.button
+                                                type="button"
+                                                onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
+                                                whileHover={{ scale: 1.01 }}
+                                                whileTap={{ scale: 0.98 }}
+                                                transition={starosSpring}
+                                                className={cn(
+                                                  "w-full sm:w-auto sm:min-w-[280px] flex items-center justify-between gap-3 py-1.5 px-4 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
+                                                  isCollapsed
+                                                    ? (isLight
+                                                        ? "bg-blue-500/10 border-blue-600/25 text-blue-900 hover:bg-blue-500/20 shadow-sm"
+                                                        : "staros-glass-pill border-blue-500/30 text-blue-300 hover:bg-blue-500/20 hover:border-blue-400/50 shadow-[0_0_12px_rgba(59,130,246,0.2)]")
+                                                    : (isLight
+                                                        ? "bg-blue-500/20 border-blue-600/40 text-blue-950 shadow-inner"
+                                                        : "bg-blue-500/25 border-blue-400/50 text-blue-200 shadow-[0_0_15px_rgba(59,130,246,0.3)]")
+                                                )}
+                                                title={isCollapsed ? 'Desplegar galería de imágenes' : 'Minimizar galería de imágenes'}
+                                              >
+                                                <div className="flex items-center gap-2 min-w-0">
+                                                  <ImageIcon className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                                                  <span className="truncate">
+                                                    {isCollapsed ? 'Desplegar Galería de Imágenes' : 'Minimizar Galería de Imágenes'}
+                                                  </span>
+                                                  {chapterImages.length > 0 && (
+                                                    <span className="text-[10px] font-mono opacity-80 px-1.5 py-0.5 rounded-full bg-blue-500/20 border border-blue-500/30 hidden sm:inline shrink-0">
+                                                      {chapterImages.length} {chapterImages.length === 1 ? 'imagen' : 'imágenes'}
+                                                    </span>
+                                                  )}
+                                                </div>
+                                                <div className="flex items-center gap-1.5 shrink-0 text-xs font-medium opacity-90 pl-2 border-l border-blue-500/20">
+                                                  <span className="text-[11px] hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
+                                                  {isCollapsed ? (
+                                                    <ChevronDown className="w-4 h-4 text-blue-400" />
+                                                  ) : (
+                                                    <ChevronUp className="w-4 h-4 text-blue-400" />
+                                                  )}
+                                                </div>
+                                              </motion.button>
+                                            )}
                                           </div>
                                         </div>
 
@@ -2526,6 +3391,75 @@ export default function DashboardClient() {
                                             ) : chapter.status === 'pending' && chapterImages.length === 0 && !chapter.videoUrl ? (
                                               <div className="py-6 text-center text-xs text-neutral-500 font-mono">
                                                 {t('pending')}...
+                                              </div>
+                                            ) : (chapter.mediaType === 'image_with_audio' || tracker.mediaType === 'image_with_audio' || (chapterImages.length > 0 && (chapter.audioUrl || tracker.chapters?.[0]?.audioUrl))) ? (
+                                              <div className="flex flex-col items-center gap-4 max-w-2xl mx-auto py-2">
+                                                <div className="w-full relative rounded-2xl overflow-hidden bg-black border border-white/10 shadow-2xl flex flex-col items-center">
+                                                  {chapterImages[0] && (
+                                                    <div className="relative w-full aspect-square max-h-[420px] bg-neutral-950">
+                                                      <Image 
+                                                        src={getProxiedImageUrl(chapterImages[0])} 
+                                                        alt={chapter.name} 
+                                                        fill 
+                                                        className="object-contain" 
+                                                        referrerPolicy="no-referrer"
+                                                        unoptimized
+                                                      />
+                                                      <div className="absolute top-3 left-3 bg-black/70 backdrop-blur-md px-3 py-1 rounded-full text-xs font-semibold text-emerald-300 border border-emerald-500/30 flex items-center gap-1.5 shadow-lg">
+                                                        <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                                                        <span>{t('imageWithAudio')}</span>
+                                                      </div>
+                                                    </div>
+                                                  )}
+                                                  {(chapter.audioUrl || chapter.videoUrl) && (
+                                                    <div className="w-full p-3 bg-neutral-900/90 border-t border-white/10 flex items-center gap-3">
+                                                      <audio 
+                                                        controls 
+                                                        src={chapter.audioUrl || chapter.videoUrl} 
+                                                        className="w-full h-10"
+                                                      />
+                                                    </div>
+                                                  )}
+                                                </div>
+                                                <div className="flex flex-wrap items-center justify-center gap-2.5">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleExportVideo(tracker, 'mp4', undefined, `${tracker.title || 'video'}_${chapter.name}`, chapter.id)}
+                                                    disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
+                                                    className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-emerald-500 hover:bg-emerald-400 text-black text-xs font-bold shadow-lg transition-all cursor-pointer"
+                                                  >
+                                                    <VideoIcon className="w-3.5 h-3.5" />
+                                                    <span>{t('exportImageAudioVideo')}</span>
+                                                  </button>
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => handleExportVideo(tracker, 'mp3', undefined, `${tracker.title || 'audio'}_${chapter.name}`, chapter.id)}
+                                                    disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
+                                                    className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-neutral-800 hover:bg-neutral-700 border border-white/10 text-neutral-200 text-xs font-bold shadow-lg transition-all cursor-pointer"
+                                                  >
+                                                    <Music className="w-3.5 h-3.5 text-emerald-400" />
+                                                    <span>{t('exportAudioTrack')}</span>
+                                                  </button>
+                                                  {chapterImages[0] && (
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => handleDownloadSinglePage(chapterImages[0], 1, `${tracker.title || 'imagen'}_${chapter.name}`)}
+                                                      className="flex items-center gap-1.5 px-3 py-2 rounded-full bg-neutral-800 hover:bg-neutral-700 border border-white/10 text-neutral-300 text-xs font-semibold shadow-lg transition-all cursor-pointer"
+                                                    >
+                                                      <Download className="w-3.5 h-3.5" />
+                                                      <span>{t('exportImageOnly')}</span>
+                                                    </button>
+                                                  )}
+                                                  <button
+                                                    type="button"
+                                                    onClick={() => setAudioModalData({ isOpen: true, tracker, chapter })}
+                                                    className="flex items-center gap-1.5 px-3 py-2 rounded-full bg-neutral-800 hover:bg-neutral-700 border border-white/10 text-amber-300 text-xs font-semibold shadow-lg transition-all cursor-pointer"
+                                                    title="Vincular o buscar pista de audio"
+                                                  >
+                                                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                                                    <span>{chapter.audioUrl ? 'Cambiar Audio' : 'Vincular Audio'}</span>
+                                                  </button>
+                                                </div>
                                               </div>
                                             ) : (chapter.mediaType === 'video' || tracker.mediaType === 'video' || tracker.category === 'video' || chapter.videoUrl) && (chapter.videoUrl || tracker.videoUrl) ? (
                                               <div className="flex flex-col items-center gap-4 max-w-2xl mx-auto py-2">
@@ -2563,7 +3497,22 @@ export default function DashboardClient() {
                                             ) : chapterImages.length > 0 ? (
                                               expandedViews[tracker.id] === 'preview' ? (
                                                 /* PREVIEW MODE: Chapter Thumbnail Grid with Single Image Download */
-                                                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
+                                                <div className="space-y-3">
+                                                  <div className="flex flex-wrap items-center justify-between gap-3 p-2.5 rounded-xl bg-neutral-900/60 border border-white/5">
+                                                    <div className="text-xs text-neutral-400">
+                                                      {chapterImages.length} {chapterImages.length === 1 ? 'imagen' : 'páginas / imágenes'}
+                                                    </div>
+                                                    <button
+                                                      type="button"
+                                                      onClick={() => setAudioModalData({ isOpen: true, tracker, chapter })}
+                                                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-amber-500/20 hover:bg-amber-500/30 border border-amber-500/30 text-amber-300 text-xs font-semibold shadow transition-all cursor-pointer"
+                                                      title="Vincular o buscar pista de audio para generar video con audio o MP3"
+                                                    >
+                                                      <Music className="w-3.5 h-3.5 text-amber-400" />
+                                                      <span>{chapter.audioUrl || tracker.audioUrl ? 'Audio Vinculado (Cambiar)' : '🎵 Vincular / Buscar Audio'}</span>
+                                                    </button>
+                                                  </div>
+                                                  <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3">
                                                   {chapterImages.map((img, pageIdx) => {
                                                     const dlKey = `${img}_${pageIdx + 1}`;
                                                     const isDownloadingThis = downloadingSinglePage === dlKey;
@@ -2606,6 +3555,7 @@ export default function DashboardClient() {
                                                       </div>
                                                     );
                                                   })}
+                                                  </div>
                                                 </div>
                                               ) : (
                                                 /* FULL VIEW MODE: Continuous high-res vertical webtoon scroll */
@@ -2697,380 +3647,23 @@ export default function DashboardClient() {
           </AnimatePresence>
         </div>
 
-        {/* Dedicated Space at bottom for floating Language Capsule */}
-        <div className="h-16 sm:h-20" aria-hidden="true" />
+        {/* Subtle bottom padding */}
+        <div className="h-8" aria-hidden="true" />
       </div>
 
-      {/* Fixed Floating Water Ripple Language Capsule */}
+      {/* Fixed Floating Lateral Language & Theme Capsule */}
       <LanguageCapsule />
 
-      {/* New Task Modal - Responsive with Vertical Scroll */}
-      <AnimatePresence>
-        {showNewModal && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-3 sm:p-4 overflow-y-auto">
-            {/* Backdrop */}
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              className="fixed inset-0 bg-black/80 backdrop-blur-md"
-              onClick={() => setShowNewModal(false)}
-            />
+      {/* Inline task settings are integrated directly into the header layout */}
 
-            {/* Modal Dialog with Fixed Header & Footer + Scrollable Body */}
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 10 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 10 }}
-              className="liquid-glass relative z-10 w-full max-w-lg max-h-[88vh] sm:max-h-[85vh] flex flex-col rounded-3xl border border-white/15 bg-neutral-950/95 backdrop-blur-2xl shadow-2xl overflow-hidden my-auto"
-            >
-              {/* 1. Modal Header (Fixed at top) */}
-              <div className="flex items-center justify-between px-5 py-4 sm:px-6 sm:py-5 border-b border-white/10 shrink-0 bg-white/[0.02]">
-                <div className="flex items-center gap-3">
-                  <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-500/30 flex items-center justify-center text-emerald-400">
-                    <Sparkles className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h2 className="text-base sm:text-lg font-medium text-white tracking-tight leading-tight">
-                      {t('createNewTask')}
-                    </h2>
-                    <p className="text-[11px] sm:text-xs text-neutral-400 hidden sm:block">
-                      {t('createTaskSubtitle')}
-                    </p>
-                  </div>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => setShowNewModal(false)}
-                  className="p-2 rounded-xl text-neutral-400 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                  title={t('cancel')}
-                >
-                  <X className="w-5 h-5" />
-                </button>
-              </div>
-              
-              {/* 2. Modal Body (Scrollable with custom scrollbar) */}
-              <div className="flex-1 overflow-y-auto px-5 py-5 sm:px-6 sm:py-6 space-y-5 custom-scrollbar">
-                {/* 2.1 Category Selection Tabs */}
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-neutral-300 ml-1">
-                    {t('searchCategory')}
-                  </label>
-                  <div className="grid grid-cols-3 gap-2">
-                    {/* Manga */}
-                    <button
-                      id="category-manga-btn"
-                      type="button"
-                      onClick={() => setNewCategory('manga')}
-                      className={cn(
-                        "flex flex-col items-center gap-1.5 p-3 rounded-2xl border text-center transition-all cursor-pointer",
-                        newCategory === 'manga'
-                          ? "bg-emerald-500/20 border-emerald-400 text-white shadow-lg shadow-emerald-500/10 font-medium"
-                          : "bg-white/5 border-white/10 text-neutral-400 hover:bg-white/10 hover:text-white"
-                      )}
-                    >
-                      <BookOpen className={cn("w-5 h-5", newCategory === 'manga' ? "text-emerald-400" : "text-neutral-400")} />
-                      <span className="text-xs">{t('categoryManga')}</span>
-                      <span className="text-[10px] font-mono opacity-70">PDF • ZIP</span>
-                    </button>
-
-                    {/* Video */}
-                    <button
-                      id="category-video-btn"
-                      type="button"
-                      onClick={() => setNewCategory('video')}
-                      className={cn(
-                        "flex flex-col items-center gap-1.5 p-3 rounded-2xl border text-center transition-all cursor-pointer",
-                        newCategory === 'video'
-                          ? "bg-red-500/20 border-red-400 text-white shadow-lg shadow-red-500/10 font-medium"
-                          : "bg-white/5 border-white/10 text-neutral-400 hover:bg-white/10 hover:text-white"
-                      )}
-                    >
-                      <VideoIcon className={cn("w-5 h-5", newCategory === 'video' ? "text-red-400" : "text-neutral-400")} />
-                      <span className="text-xs">{t('categoryVideo')}</span>
-                      <span className="text-[10px] font-mono opacity-70">MP4 • MP3</span>
-                    </button>
-
-                    {/* Imagen */}
-                    <button
-                      id="category-image-btn"
-                      type="button"
-                      onClick={() => setNewCategory('image')}
-                      className={cn(
-                        "flex flex-col items-center gap-1.5 p-3 rounded-2xl border text-center transition-all cursor-pointer",
-                        newCategory === 'image'
-                          ? "bg-blue-500/20 border-blue-400 text-white shadow-lg shadow-blue-500/10 font-medium"
-                          : "bg-white/5 border-white/10 text-neutral-400 hover:bg-white/10 hover:text-white"
-                      )}
-                    >
-                      <ImageIcon className={cn("w-5 h-5", newCategory === 'image' ? "text-blue-400" : "text-neutral-400")} />
-                      <span className="text-xs">{t('categoryImage')}</span>
-                      <span className="text-[10px] font-mono opacity-70">ZIP • WebP</span>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 2. Target URL with fixed https:// and dynamic Paste / Clear button */}
-                <div className="space-y-2">
-                  <label htmlFor="target-url-input" className="text-xs font-semibold uppercase tracking-wider text-neutral-300 ml-1">
-                    {newCategory === 'video' ? 'URL del Video' : newCategory === 'image' ? 'URL de la Imagen / Galería' : t('mangaUrl')}
-                  </label>
-                  
-                  <div className="relative flex items-center w-full rounded-2xl bg-white/5 border border-white/15 focus-within:border-emerald-400/60 focus-within:ring-2 focus-within:ring-emerald-400/30 transition-all overflow-hidden group shadow-inner">
-                    {/* Fixed https:// prefix badge */}
-                    <div className="flex items-center pl-3.5 pr-2.5 py-3 text-emerald-400 font-mono text-sm font-semibold select-none shrink-0 bg-white/[0.04] border-r border-white/10">
-                      <span className="opacity-70 text-neutral-400 mr-0.5">https://</span>
-                    </div>
-
-                    {/* Cleaned URL Input without duplicating https:// */}
-                    <input 
-                      id="target-url-input"
-                      ref={inputRef}
-                      type="text"
-                      value={newUrl}
-                      onChange={handleUrlChange}
-                      placeholder={
-                        newCategory === 'video' 
-                          ? "youtube.com/watch?v=... o tiktok.com/@user/video/..." 
-                          : newCategory === 'image' 
-                          ? "tiktok.com/@user/photo/... o instagram.com/p/..." 
-                          : "olympusscans.com/series/... o manhwaweb.com/leer/..."
-                      }
-                      className="w-full bg-transparent px-3 py-3 text-white placeholder:text-neutral-500 focus:outline-none font-mono text-sm pr-24"
-                      autoFocus
-                    />
-
-                    {/* Dynamic Action Button: Paste when empty, Clear X when filled */}
-                    <div className="absolute right-2 flex items-center">
-                      <AnimatePresence mode="wait" initial={false}>
-                        {!newUrl ? (
-                          <motion.button
-                            key="paste-btn"
-                            id="paste-url-btn"
-                            type="button"
-                            initial={{ opacity: 0, scale: 0.85 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.85 }}
-                            transition={{ duration: 0.15 }}
-                            onClick={handlePasteUrl}
-                            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 hover:text-white border border-emerald-500/40 text-xs font-medium cursor-pointer transition-all shadow-sm"
-                            title={t('paste')}
-                          >
-                            <Clipboard className="w-3.5 h-3.5" />
-                            <span>{t('paste')}</span>
-                          </motion.button>
-                        ) : (
-                          <motion.button
-                            key="clear-btn"
-                            id="clear-url-btn"
-                            type="button"
-                            initial={{ opacity: 0, scale: 0.85 }}
-                            animate={{ opacity: 1, scale: 1 }}
-                            exit={{ opacity: 0, scale: 0.85 }}
-                            transition={{ duration: 0.15 }}
-                            onClick={handleClearUrl}
-                            className="p-1.5 rounded-xl bg-white/10 hover:bg-red-500/25 text-neutral-300 hover:text-red-300 border border-white/10 hover:border-red-500/40 text-xs transition-all cursor-pointer shadow-sm"
-                            title={t('clear')}
-                          >
-                            <X className="w-4 h-4" />
-                          </motion.button>
-                        )}
-                      </AnimatePresence>
-                    </div>
-                  </div>
-                </div>
-
-                {/* 3. Category Description Summary */}
-                <div className={cn(
-                  "p-3 rounded-2xl border flex items-center justify-between transition-colors",
-                  newCategory === 'video'
-                    ? "bg-red-950/40 border-red-500/30"
-                    : newCategory === 'image'
-                    ? "bg-blue-950/40 border-blue-500/30"
-                    : "bg-emerald-950/40 border-emerald-500/30"
-                )}>
-                  <div className="flex items-center gap-2.5">
-                    <div className={cn(
-                      "w-8 h-8 rounded-xl border flex items-center justify-center shrink-0",
-                      newCategory === 'video'
-                        ? "bg-red-500/20 border-red-500/40 text-red-400"
-                        : newCategory === 'image'
-                        ? "bg-blue-500/20 border-blue-500/40 text-blue-400"
-                        : "bg-emerald-500/20 border-emerald-500/40 text-emerald-400"
-                    )}>
-                      {newCategory === 'video' ? <VideoIcon className="w-4 h-4" /> : newCategory === 'image' ? <ImageIcon className="w-4 h-4" /> : <BookOpen className="w-4 h-4" />}
-                    </div>
-                    <div>
-                      <div className={cn(
-                        "text-xs font-semibold uppercase tracking-wide",
-                        newCategory === 'video' ? "text-red-300" : newCategory === 'image' ? "text-blue-300" : "text-emerald-300"
-                      )}>
-                        {newCategory === 'video' ? t('categoryVideo') : newCategory === 'image' ? t('categoryImage') : t('categoryManga')}
-                      </div>
-                      <div className="text-[11px] text-neutral-400">
-                        {newCategory === 'video' ? t('categoryVideoDesc') : newCategory === 'image' ? t('categoryImageDesc') : t('categoryMangaDesc')}
-                      </div>
-                    </div>
-                  </div>
-                  <span className={cn(
-                    "px-2 py-0.5 rounded-md text-[10px] font-mono border font-semibold",
-                    newCategory === 'video'
-                      ? "bg-red-500/20 text-red-300 border-red-500/30"
-                      : newCategory === 'image'
-                      ? "bg-blue-500/20 text-blue-300 border-blue-500/30"
-                      : "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
-                  )}>
-                    {newCategory === 'video' ? 'MP4 • MP3' : newCategory === 'image' ? 'ZIP • WebP' : 'PDF • ZIP • CBZ'}
-                  </span>
-                </div>
-
-                {/* 4. Tracking Modes Grid */}
-                <div className="space-y-2">
-                  <label className="text-xs font-semibold uppercase tracking-wider text-neutral-300 ml-1">
-                    {t('trackingMode')}
-                  </label>
-                  <div className="grid gap-2.5">
-                    {/* Single Mode */}
-                    <button 
-                      id="mode-single-btn"
-                      type="button"
-                      onClick={() => setNewMode('single')}
-                      className={cn(
-                        "flex items-center gap-3.5 p-3.5 rounded-2xl border text-left transition-all cursor-pointer",
-                        newMode === 'single' 
-                          ? "bg-emerald-500/15 border-emerald-400/50 shadow-[0_0_15px_rgba(16,185,129,0.15)]" 
-                          : "bg-white/5 border-white/5 hover:border-white/15 hover:bg-white/10"
-                      )}
-                    >
-                      <div className={cn("p-2 rounded-full", newMode === 'single' ? "bg-emerald-500/20 text-emerald-300" : "bg-white/5 text-neutral-400")}>
-                        <ArrowDownToLine className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-white">
-                          {t('modeSingle')}
-                        </div>
-                        <div className="text-xs text-neutral-400">
-                          {t('trackOnlyOneSpecified')}
-                        </div>
-                      </div>
-                    </button>
-
-                    {/* Sequential Mode */}
-                    <button 
-                      id="mode-sequential-btn"
-                      type="button"
-                      onClick={() => setNewMode('sequential')}
-                      className={cn(
-                        "flex items-center gap-3.5 p-3.5 rounded-2xl border text-left transition-all cursor-pointer",
-                        newMode === 'sequential' 
-                          ? "bg-blue-500/15 border-blue-400/50 shadow-[0_0_15px_rgba(59,130,246,0.15)]" 
-                          : "bg-white/5 border-white/5 hover:border-white/15 hover:bg-white/10"
-                      )}
-                    >
-                      <div className={cn("p-2 rounded-full", newMode === 'sequential' ? "bg-blue-500/20 text-blue-300" : "bg-white/5 text-neutral-400")}>
-                        <List className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-white">
-                          {t('modeSequential')}
-                        </div>
-                        <div className="text-xs text-neutral-400">
-                          {t('trackAllOneAfterAnother')}
-                        </div>
-                      </div>
-                    </button>
-
-                    {/* Continuous / Batch Mode */}
-                    <button 
-                      id="mode-continuous-btn"
-                      type="button"
-                      onClick={() => setNewMode('continuous')}
-                      className={cn(
-                        "flex items-center gap-3.5 p-3.5 rounded-2xl border text-left transition-all cursor-pointer",
-                        newMode === 'continuous' 
-                          ? "bg-amber-500/15 border-amber-400/50 shadow-[0_0_15px_rgba(245,158,11,0.15)]" 
-                          : "bg-white/5 border-white/5 hover:border-white/15 hover:bg-white/10"
-                      )}
-                    >
-                      <div className={cn("p-2 rounded-full", newMode === 'continuous' ? "bg-amber-500/20 text-amber-300" : "bg-white/5 text-neutral-400")}>
-                        <Zap className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-sm font-medium text-white">
-                          {t('modeContinuous')}
-                        </div>
-                        <div className="text-xs text-neutral-400">
-                          {t('trackAllSimultaneously')}
-                        </div>
-                      </div>
-                    </button>
-                  </div>
-                </div>
-
-                {/* 5. Slow Server / Wait Mode Option */}
-                {newCategory === 'manga' && (
-                  <div className="p-3.5 rounded-2xl bg-emerald-950/30 border border-emerald-500/30 flex items-center justify-between gap-3">
-                    <div className="flex items-center gap-3 min-w-0">
-                      <div className="p-2 rounded-xl bg-emerald-500/20 text-emerald-400 shrink-0">
-                        <Clock className="w-4 h-4" />
-                      </div>
-                      <div>
-                        <div className="text-xs font-semibold text-white flex items-center gap-2">
-                          <span>{t('smartWaitMode')}</span>
-                          <span className="px-1.5 py-0.5 rounded text-[9px] font-mono bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                            {t('antiCrash')}
-                          </span>
-                        </div>
-                        <div className="text-[11px] text-neutral-400">
-                          {t('smartWaitModeDesc')}
-                        </div>
-                      </div>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() => setNewSlowServerMode(prev => !prev)}
-                      className={cn(
-                        "relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none",
-                        newSlowServerMode ? "bg-emerald-500" : "bg-white/20"
-                      )}
-                    >
-                      <span
-                        className={cn(
-                          "pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out",
-                          newSlowServerMode ? "translate-x-5" : "translate-x-0"
-                        )}
-                      />
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {/* 3. Modal Footer (Fixed at bottom) */}
-              <div className="flex items-center justify-end gap-3 px-5 py-4 sm:px-6 sm:py-4 border-t border-white/10 bg-neutral-950/80 backdrop-blur-md shrink-0">
-                <button 
-                  type="button"
-                  onClick={() => setShowNewModal(false)}
-                  className="px-5 py-2 rounded-full text-neutral-400 hover:text-white hover:bg-white/5 text-sm font-medium transition-colors cursor-pointer"
-                >
-                  {t('cancel')}
-                </button>
-                <button 
-                  id="submit-new-task-btn"
-                  type="button"
-                  onClick={addTracker}
-                  disabled={!newUrl.trim()}
-                  className="liquid-glass liquid-button px-6 py-2.5 rounded-full text-white font-medium text-sm disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer shadow-lg hover:shadow-emerald-500/20 border border-emerald-500/30 flex items-center gap-2"
-                >
-                  <Sparkles className="w-4 h-4 text-emerald-400" />
-                  <span>{t('addTask')}</span>
-                </button>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
+      {/* Audio Link & Search Modal for static images/Instagram tracks */}
+      <AudioLinkModal
+        isOpen={audioModalData.isOpen}
+        onClose={() => setAudioModalData(prev => ({ ...prev, isOpen: false }))}
+        tracker={audioModalData.tracker}
+        chapter={audioModalData.chapter}
+        onAudioAttached={handleUpdateAudio}
+      />
     </div>
   );
 }

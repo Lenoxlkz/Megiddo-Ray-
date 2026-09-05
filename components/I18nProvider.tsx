@@ -159,7 +159,14 @@ export const translations = {
     exportSelectedVideo: 'Download Video (MP4)',
     exportSelectedAudio: 'Extract Audio (MP3)',
     exportingVideo: 'Exporting Video...',
-    exportingAudio: 'Extracting MP3...'
+    exportingAudio: 'Extracting MP3...',
+    imageWithAudio: 'Image with Audio',
+    exportImageAudioVideo: 'Export as Video (MP4)',
+    exportAudioTrack: 'Export Audio (MP3)',
+    exportImageOnly: 'Download Image',
+    playAudio: 'Play Audio',
+    pauseAudio: 'Pause Audio',
+    synthesizingVideo: 'Generating MP4 Video from Image + Audio...'
   },
   es: {
     appTitle: 'Liquid Fast Download',
@@ -315,7 +322,14 @@ export const translations = {
     exportSelectedVideo: 'Descargar Video (MP4)',
     exportSelectedAudio: 'Extraer Audio (MP3)',
     exportingVideo: 'Exportando Video...',
-    exportingAudio: 'Extrayendo Audio MP3...'
+    exportingAudio: 'Extrayendo Audio MP3...',
+    imageWithAudio: 'Imagen con Audio',
+    exportImageAudioVideo: 'Exportar como Video (MP4)',
+    exportAudioTrack: 'Exportar Audio (MP3)',
+    exportImageOnly: 'Descargar Imagen',
+    playAudio: 'Reproducir Audio',
+    pauseAudio: 'Pausar Audio',
+    synthesizingVideo: 'Generando Video MP4 de Imagen + Audio...'
   }
 } as const;
 
