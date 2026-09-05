@@ -26,7 +26,9 @@ export interface ChapterItem {
   images?: string[];
   imageCount?: number;
   videoUrl?: string;
-  mediaType?: 'image' | 'video';
+  audioUrl?: string;
+  hasAudio?: boolean;
+  mediaType?: 'image' | 'video' | 'image_with_audio' | 'audio';
   author?: string;
   status?: string;
 }
@@ -382,6 +384,7 @@ export async function POST(req: NextRequest) {
 
         const author = igData.author || '';
         const isVideo = igData.mediaType === 'video' || !!igData.videoUrl;
+        const isImageWithAudio = igData.mediaType === 'image_with_audio' || (igData.hasAudio && !isVideo);
         seriesTitle = igData.seriesTitle || (author ? `Instagram de ${author}` : 'Instagram');
 
         if (isVideo) {
@@ -392,6 +395,8 @@ export async function POST(req: NextRequest) {
             images: igData.images.slice(0, 1),
             imageCount: 1,
             videoUrl: igData.videoUrl,
+            audioUrl: igData.audioUrl || igData.videoUrl,
+            hasAudio: true,
             mediaType: 'video',
             status: 'completed'
           });
@@ -402,6 +407,38 @@ export async function POST(req: NextRequest) {
             category: 'video',
             mediaType: 'video',
             videoUrl: igData.videoUrl,
+            audioUrl: igData.audioUrl || igData.videoUrl,
+            hasAudio: true,
+            images: igData.images,
+            author,
+            authorUrl: igData.authorUrl,
+            totalChapters: 1,
+            chapters
+          });
+        }
+
+        if (isImageWithAudio) {
+          chapters.push({
+            id: '1',
+            name: igData.chapterName || (author ? `${author} - Imagen con Audio` : (shortcode ? `Post ${shortcode}` : 'Publicación con Audio')),
+            url: targetUrl,
+            images: igData.images.slice(0, 1),
+            imageCount: 1,
+            videoUrl: igData.videoUrl,
+            audioUrl: igData.audioUrl,
+            hasAudio: true,
+            mediaType: 'image_with_audio',
+            status: 'completed'
+          });
+
+          return NextResponse.json({
+            success: true,
+            seriesTitle,
+            category: 'video',
+            mediaType: 'image_with_audio',
+            videoUrl: igData.videoUrl,
+            audioUrl: igData.audioUrl,
+            hasAudio: true,
             images: igData.images,
             author,
             authorUrl: igData.authorUrl,
