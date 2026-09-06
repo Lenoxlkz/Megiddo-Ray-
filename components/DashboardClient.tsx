@@ -47,8 +47,19 @@ import Image from 'next/image';
 import { useI18n } from '@/components/I18nProvider';
 import { TerminalTitle } from '@/components/TerminalTitle';
 import { LanguageCapsule } from '@/components/LanguageCapsule';
-import { exportWithPdfLib, exportWithImg2Pdf } from '@/lib/pdfExporter';
-import { exportImagesPackage, downloadSingleImage } from '@/lib/imageExporter';
+import { PWAInstallButton } from '@/components/PWAInstallButton';
+import { 
+  exportWithPdfLib, 
+  exportWithImg2Pdf, 
+  exportCombinedPdfWithFallback, 
+  exportSelectedChaptersAsZipPdfs, 
+  exportSelectedChaptersIndividualPdfs 
+} from '@/lib/pdfExporter';
+import { 
+  exportImagesPackage, 
+  downloadSingleImage, 
+  exportSelectedChaptersIndividualCbz 
+} from '@/lib/imageExporter';
 import { exportVideo, exportAudioMp3, exportImageWithAudioAsVideo } from '@/lib/videoExporter';
 import { AudioLinkModal } from '@/components/AudioLinkModal';
 import { useTheme } from '@/components/ThemeProvider';
@@ -223,6 +234,7 @@ export default function DashboardClient() {
   const inputRef = useRef<HTMLInputElement>(null);
   const [expandedViews, setExpandedViews] = useState<Record<string, 'preview' | 'full'>>({});
   const [collapsedChapters, setCollapsedChapters] = useState<Record<string, boolean>>({});
+  const [expandedMangaExport, setExpandedMangaExport] = useState<Record<string, boolean>>({});
   const [openCustomPanels, setOpenCustomPanels] = useState<Record<string, boolean>>({});
   const [selectedChapters, setSelectedChapters] = useState<Record<string, Record<string | number, boolean>>>({});
   const [customQty, setCustomQty] = useState<Record<string, string>>({});
@@ -317,6 +329,13 @@ export default function DashboardClient() {
 
   const toggleCustomPanel = (trackerId: string) => {
     setOpenCustomPanels(prev => ({
+      ...prev,
+      [trackerId]: !prev[trackerId]
+    }));
+  };
+
+  const toggleMangaExport = (trackerId: string) => {
+    setExpandedMangaExport(prev => ({
       ...prev,
       [trackerId]: !prev[trackerId]
     }));
@@ -463,11 +482,12 @@ export default function DashboardClient() {
     if (selectedChapterList.length === 0) return;
 
     const isSlow = tracker.slowServerMode ?? true;
+    const isSequential = tracker.mode === 'sequential';
     setIsBatchDownloading(prev => ({ ...prev, [tracker.id]: true }));
-    showToast(`Iniciando descarga de ${selectedChapterList.length} capítulos ${isSlow ? '(Modo Espera)' : ''}...`);
+    showToast(`Iniciando descarga de ${selectedChapterList.length} capítulos (${isSequential ? 'Modo Secuencial' : 'Modo Simultáneo'}${isSlow ? ' + Espera' : ''})...`);
     
-    // Controlled concurrency to prevent overwhelming slow manga host servers
-    const CONCURRENCY = isSlow ? 2 : 4;
+    // Concurrency: 1 if sequential (one by one), 2 if slow server, 4 if simultaneous
+    const CONCURRENCY = isSequential ? 1 : (isSlow ? 2 : 4);
     let curIdx = 0;
     const updatedChapters = [...(tracker.chapters || [])];
 
@@ -509,9 +529,11 @@ export default function DashboardClient() {
 
         setTrackers(prev => prev.map(item => item.id === tracker.id ? { ...item, chapters: [...updatedChapters] } : item));
 
-        // Intelligent pacing delay between chapter requests when in slow server mode
-        if (isSlow) {
-          await new Promise(r => setTimeout(r, 600));
+        // Intelligent pacing delay between chapter requests
+        if (isSequential) {
+          await new Promise(r => setTimeout(r, isSlow ? 600 : 250));
+        } else if (isSlow) {
+          await new Promise(r => setTimeout(r, 450));
         }
       }
     };
@@ -544,6 +566,92 @@ export default function DashboardClient() {
     } else {
       showToast(`Finalizado. ${failedCount} capítulos requieren reintento (Modo Espera disponible).`);
     }
+  };
+
+  // Helper to ensure target chapters are downloaded into memory before packaging
+  const ensureChaptersDownloaded = async (tracker: Tracker, targetChapters: ChapterInfo[]): Promise<ChapterInfo[]> => {
+    const missing = targetChapters.filter(c => !c.images || c.images.length === 0);
+    if (missing.length === 0) {
+      return targetChapters;
+    }
+
+    const isSlow = tracker.slowServerMode ?? true;
+    const isSequential = tracker.mode === 'sequential';
+    const CONCURRENCY = isSequential ? 1 : (isSlow ? 2 : 4);
+
+    setIsBatchDownloading(prev => ({ ...prev, [tracker.id]: true }));
+    showToast(`Descargando ${missing.length} capítulos requeridos (${isSequential ? 'Secuencial' : 'Simultáneo'})...`);
+
+    let curIdx = 0;
+    const updatedChapters = [...(tracker.chapters || [])];
+
+    const worker = async () => {
+      while (curIdx < missing.length) {
+        const targetCh = missing[curIdx++];
+        if (!targetCh) break;
+
+        const chIdx = updatedChapters.findIndex(c => c.id === targetCh.id);
+        if (chIdx === -1) continue;
+
+        updatedChapters[chIdx] = { 
+          ...updatedChapters[chIdx], 
+          status: 'downloading',
+          errorMsg: undefined
+        };
+        setTrackers(prev => prev.map(item => item.id === tracker.id ? { ...item, chapters: [...updatedChapters] } : item));
+
+        try {
+          const res = await downloadChapterWithAdaptiveRetry(targetCh.url, isSlow, (attempt, max, text) => {
+            updatedChapters[chIdx] = { ...updatedChapters[chIdx], errorMsg: text };
+            setTrackers(prev => prev.map(item => item.id === tracker.id ? { ...item, chapters: [...updatedChapters] } : item));
+          });
+
+          updatedChapters[chIdx] = {
+            ...updatedChapters[chIdx],
+            status: res.success ? 'completed' : 'error',
+            images: res.images,
+            imageCount: res.images.length,
+            videoUrl: res.videoUrl || updatedChapters[chIdx].videoUrl,
+            mediaType: res.mediaType || updatedChapters[chIdx].mediaType,
+            author: res.author || updatedChapters[chIdx].author,
+            errorMsg: res.success ? undefined : 'Servidor tardó en responder'
+          };
+        } catch (e) {
+          console.error("Error downloading chapter:", e);
+          updatedChapters[chIdx] = { ...updatedChapters[chIdx], status: 'error', errorMsg: 'Error de red' };
+        }
+
+        setTrackers(prev => prev.map(item => item.id === tracker.id ? { ...item, chapters: [...updatedChapters] } : item));
+
+        if (isSequential) {
+          await new Promise(r => setTimeout(r, isSlow ? 600 : 250));
+        } else if (isSlow) {
+          await new Promise(r => setTimeout(r, 450));
+        }
+      }
+    };
+
+    const workers = [];
+    for (let w = 0; w < Math.min(CONCURRENCY, missing.length); w++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+
+    const finalImgs: string[] = [];
+    updatedChapters.forEach(c => {
+      if (c.images) finalImgs.push(...c.images);
+    });
+
+    setTrackers(prev => prev.map(item => item.id === tracker.id ? {
+      ...item,
+      chapters: updatedChapters,
+      images: finalImgs,
+      imageCount: finalImgs.length,
+      status: updatedChapters.every(c => c.status === 'completed') ? 'completed' : item.status
+    } : item));
+
+    setIsBatchDownloading(prev => ({ ...prev, [tracker.id]: false }));
+    return targetChapters.map(ch => updatedChapters.find(u => u.id === ch.id) || ch);
   };
 
   // Dedicated one-click recovery for all failed / broken chapters with Mode Espera
@@ -690,12 +798,79 @@ export default function DashboardClient() {
     }
   };
 
-  // Export all selected chapters into 1 combined PDF
-  const handleExportSelectedCombined = async (tracker: Tracker, engine: 'pdflib' | 'img2pdf') => {
+  // 1. Download & Export Batch Chapters into a Single PDF (pdf-lib primary, img2pdf fallback)
+  const handleDownloadBatchToSinglePdf = async (tracker: Tracker, qty?: number, direction?: 'first' | 'last') => {
+    if (!tracker.chapters || tracker.chapters.length === 0) {
+      showToast('No hay capítulos disponibles en este manga');
+      return;
+    }
+
+    let targetChapters: ChapterInfo[] = [];
+    if (direction === 'first' && qty) {
+      selectFirstNChapters(tracker, qty);
+      targetChapters = tracker.chapters.slice(0, Math.min(qty, tracker.chapters.length));
+    } else if (direction === 'last' && qty) {
+      selectLastNChapters(tracker, qty);
+      const start = Math.max(0, tracker.chapters.length - qty);
+      targetChapters = tracker.chapters.slice(start);
+    } else {
+      const trackerSel = selectedChapters[tracker.id] || {};
+      targetChapters = tracker.chapters.filter(ch => trackerSel[ch.id]);
+      if (targetChapters.length === 0) {
+        showToast('Selecciona al menos un capítulo');
+        return;
+      }
+    }
+
+    // Step 1: Ensure all targeted chapters are fully downloaded into memory
+    const downloadedChapters = await ensureChaptersDownloaded(tracker, targetChapters);
+    
+    // Step 2: Combine all chapter images in strict sequential order
+    const combinedImages: string[] = [];
+    downloadedChapters.forEach(ch => {
+      if (ch.images && ch.images.length > 0) {
+        combinedImages.push(...ch.images);
+      }
+    });
+
+    if (combinedImages.length === 0) {
+      showToast('No se pudieron obtener imágenes de los capítulos');
+      return;
+    }
+
+    // Step 3: Execute high-performance unified PDF generation (pdf-lib with img2pdf fallback)
+    const isSequential = tracker.mode === 'sequential';
+    setGeneratingPdf({ id: tracker.id, engine: 'pdflib' });
+    const title = `${tracker.title || 'manga'}_${targetChapters.length}_capitulos_unificado`;
+    showToast(`⚡ Creando 1 Solo PDF (${combinedImages.length} páginas)... Modo: ${isSequential ? 'Secuencial' : 'Simultáneo'}`);
+
+    try {
+      await exportCombinedPdfWithFallback(tracker, combinedImages, title, (pct, cur, tot, msg) => {
+        if (pct % 25 === 0 || pct === 100) {
+          showToast(msg || `Compilando PDF: ${pct}%`);
+        }
+      });
+      showToast(`¡1 Solo PDF generado con éxito! (${combinedImages.length} páginas)`);
+    } catch (err) {
+      console.error('Error generating combined PDF:', err);
+      showToast('Error al compilar el PDF');
+    } finally {
+      setGeneratingPdf(null);
+    }
+  };
+
+  // 2. Export Selected Chapters into 1 Combined PDF (pdf-lib ➜ img2pdf fallback)
+  const handleExportSelectedCombined = async (tracker: Tracker, engine?: 'pdflib' | 'img2pdf') => {
     const trackerSel = selectedChapters[tracker.id] || {};
     const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id]);
+    if (selectedChapterList.length === 0) {
+      showToast('Selecciona al menos un capítulo');
+      return;
+    }
+
+    const downloadedChapters = await ensureChaptersDownloaded(tracker, selectedChapterList);
     const combinedImages: string[] = [];
-    selectedChapterList.forEach(ch => {
+    downloadedChapters.forEach(ch => {
       if (ch.images && ch.images.length > 0) {
         combinedImages.push(...ch.images);
       }
@@ -705,30 +880,131 @@ export default function DashboardClient() {
       showToast('Los capítulos seleccionados no tienen páginas descargadas aún');
       return;
     }
-    const title = `${tracker.title || 'manga'}_${selectedChapterList.length}_capitulos`;
-    showToast(`Generando PDF combinado (${combinedImages.length} páginas)...`);
-    await handleExportPdf(tracker, engine, combinedImages, title);
-    showToast('Descarga de PDF combinado completada');
+
+    const title = `${tracker.title || 'manga'}_${selectedChapterList.length}_capitulos_unificado`;
+    setGeneratingPdf({ id: tracker.id, engine: engine || 'pdflib' });
+    showToast(`⚡ Generando 1 Solo PDF con ${combinedImages.length} páginas (pdf-lib ➜ img2pdf)...`);
+
+    try {
+      if (engine === 'pdflib') {
+        await exportWithPdfLib(tracker, combinedImages, title);
+      } else if (engine === 'img2pdf') {
+        await exportWithImg2Pdf(tracker, combinedImages, title);
+      } else {
+        await exportCombinedPdfWithFallback(tracker, combinedImages, title);
+      }
+      showToast('¡Descarga de 1 Solo PDF completada!');
+    } catch (err) {
+      console.error('Export selected combined error:', err);
+      showToast('Error al compilar el PDF');
+    } finally {
+      setGeneratingPdf(null);
+    }
   };
 
-  // Export each selected chapter as an individual separate PDF file
-  const handleExportSelectedIndividual = async (tracker: Tracker, engine: 'pdflib' | 'img2pdf') => {
+  // 3. ZIP-Selección: Cada capítulo seleccionado como PDF dentro de un archivo ZIP
+  const handleExportSelectedZipPdfs = async (tracker: Tracker) => {
     const trackerSel = selectedChapters[tracker.id] || {};
-    const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id] && ch.images && ch.images.length > 0);
+    const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id]);
     if (selectedChapterList.length === 0) {
+      showToast('Selecciona al menos un capítulo');
+      return;
+    }
+
+    const downloadedChapters = await ensureChaptersDownloaded(tracker, selectedChapterList);
+    const validChapters = downloadedChapters.filter(ch => ch.images && ch.images.length > 0);
+    if (validChapters.length === 0) {
+      showToast('Ningún capítulo seleccionado tiene páginas descargadas');
+      return;
+    }
+
+    const isSequential = tracker.mode === 'sequential';
+    setGeneratingExport({ id: tracker.id, type: 'zip_pdfs' });
+    showToast(`Empaquetando ZIP con PDFs individuales (${validChapters.length} caps)...`);
+
+    try {
+      await exportSelectedChaptersAsZipPdfs(tracker, validChapters, isSequential, (pct, cur, tot) => {
+        if (pct % 25 === 0 || pct === 100) {
+          showToast(`ZIP: ${cur}/${tot} PDFs generados (${pct}%)`);
+        }
+      });
+      showToast(`¡ZIP con ${validChapters.length} PDFs descargado con éxito!`);
+    } catch (e) {
+      console.error('Error exporting ZIP with PDFs:', e);
+      showToast('Error al generar archivo ZIP con PDFs');
+    } finally {
+      setGeneratingExport(null);
+    }
+  };
+
+  // 4. CBZ-Selección: Descarga de capítulos seleccionados en archivos .cbz individuales
+  const handleExportSelectedIndividualCbz = async (tracker: Tracker) => {
+    const trackerSel = selectedChapters[tracker.id] || {};
+    const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id]);
+    if (selectedChapterList.length === 0) {
+      showToast('Selecciona al menos un capítulo');
+      return;
+    }
+
+    const downloadedChapters = await ensureChaptersDownloaded(tracker, selectedChapterList);
+    const validChapters = downloadedChapters.filter(ch => ch.images && ch.images.length > 0);
+    if (validChapters.length === 0) {
+      showToast('Ningún capítulo seleccionado tiene páginas descargadas');
+      return;
+    }
+
+    const isSequential = tracker.mode === 'sequential';
+    setGeneratingExport({ id: tracker.id, type: 'cbz_individual' });
+    showToast(`Descargando ${validChapters.length} archivos CBZ individuales (${isSequential ? 'Secuencial' : 'Simultáneo'})...`);
+
+    try {
+      await exportSelectedChaptersIndividualCbz(tracker.title || 'manga', validChapters, isSequential, (pct, cur, tot) => {
+        if (pct % 25 === 0 || pct === 100) {
+          showToast(`CBZ: ${cur}/${tot} (${pct}%)`);
+        }
+      });
+      showToast(`¡${validChapters.length} archivos CBZ descargados con éxito!`);
+    } catch (e) {
+      console.error('Error exporting CBZ individual files:', e);
+      showToast('Error al exportar archivos CBZ');
+    } finally {
+      setGeneratingExport(null);
+    }
+  };
+
+  // 5. Individual Separate Chapter PDFs
+  const handleExportSelectedIndividual = async (tracker: Tracker, engine?: 'pdflib' | 'img2pdf') => {
+    const trackerSel = selectedChapters[tracker.id] || {};
+    const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id]);
+    if (selectedChapterList.length === 0) {
+      showToast('No hay capítulos seleccionados');
+      return;
+    }
+
+    const downloadedChapters = await ensureChaptersDownloaded(tracker, selectedChapterList);
+    const validChapters = downloadedChapters.filter(ch => ch.images && ch.images.length > 0);
+    if (validChapters.length === 0) {
       showToast('No hay capítulos seleccionados con páginas descargadas');
       return;
     }
 
-    showToast(`Exportando ${selectedChapterList.length} PDFs individuales...`);
-    for (const ch of selectedChapterList) {
-      if (ch.images && ch.images.length > 0) {
-        const title = `${tracker.title || 'manga'}_${ch.name}`;
-        await handleExportPdf(tracker, engine, ch.images, title, ch.id);
-        await new Promise(r => setTimeout(r, 400));
-      }
+    const isSequential = tracker.mode === 'sequential';
+    setGeneratingPdf({ id: tracker.id, engine: engine || 'pdflib' });
+    showToast(`Exportando ${validChapters.length} PDFs individuales (${isSequential ? 'Secuencial' : 'Simultáneo'})...`);
+
+    try {
+      await exportSelectedChaptersIndividualPdfs(tracker, validChapters, isSequential, (pct, cur, tot) => {
+        if (pct % 25 === 0 || pct === 100) {
+          showToast(`PDFs: ${cur}/${tot} (${pct}%)`);
+        }
+      });
+      showToast('Exportación de PDFs individuales finalizada');
+    } catch (e) {
+      console.error('Error exporting individual PDFs:', e);
+      showToast('Error al generar PDFs individuales');
+    } finally {
+      setGeneratingPdf(null);
     }
-    showToast('Exportación de PDFs individuales finalizada');
   };
 
   // Helper to extract all ordered deduplicated images from a tracker
@@ -2242,9 +2518,9 @@ export default function DashboardClient() {
 
                         {/* Category-Specific Exporters & View Controls */}
                         {(() => {
-                          const isManga = !tracker.category || tracker.category === 'manga';
-                          const isVideo = tracker.category === 'video' || tracker.mediaType === 'video' || tracker.mediaType === 'image_with_audio' || (tracker.chapters && tracker.chapters.some(c => c.mediaType === 'image_with_audio' || c.mediaType === 'video'));
-                          const isImage = tracker.category === 'image' && !isVideo;
+                          const isVideo = tracker.category === 'video' || tracker.mediaType === 'video' || tracker.mediaType === 'image_with_audio' || (tracker.chapters && tracker.chapters.some(c => c.mediaType === 'image_with_audio' || c.mediaType === 'video')) || !!tracker.videoUrl;
+                          const isImage = (tracker.category === 'image' || tracker.mediaType === 'image') && !isVideo;
+                          const isManga = !isVideo && !isImage && (!tracker.category || tracker.category === 'manga');
                           const trackerImgs = getTrackerImages(tracker);
                           const totalImgsCount = getTrackerImageCount(tracker);
                           const hasImages = trackerImgs.length > 0 || totalImgsCount > 0;
@@ -2293,102 +2569,133 @@ export default function DashboardClient() {
                                 </motion.button>
                               )}
 
-                              {/* 1. MANGA EXPORTERS (PDF pdf-lib, PDF img2pdf, ZIP, CBZ) */}
+                              {/* 1. MANGA EXPORTERS: CÁPSULA ÚNICA LARGA Y DELGADA CON ICONO DE DESPLEGAR Y MINIMIZAR INTEGRADO */}
                               {isManga && (hasImages || tracker.status === 'completed') && (
-                                <div className="relative inline-flex items-center rounded-full staros-glass-pill p-1 border border-emerald-400/30 shadow-[inset_0_1px_1.5px_rgba(255,255,255,0.2),0_8px_20px_rgba(0,0,0,0.35)]">
-                                  {/* Modo 1: pdf-lib */}
-                                  <motion.button
-                                    id={`export-pdflib-${tracker.id}`}
-                                    onClick={() => handleExportPdf(tracker, 'pdflib')}
-                                    disabled={generatingPdf?.id === tracker.id}
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.94 }}
-                                    transition={starosSpring}
-                                    className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
-                                      generatingPdf?.id === tracker.id && generatingPdf.engine === 'pdflib'
-                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
-                                        : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                    )}
-                                    title={t('pdfLibDescription')}
-                                  >
-                                    <FileText className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span>
-                                      {generatingPdf?.id === tracker.id && generatingPdf.engine === 'pdflib' 
-                                        ? t('generatingPdfLib') 
-                                        : t('exportPdfPdfLib')}
+                                <div className={cn(
+                                  "w-full sm:w-auto inline-flex items-center justify-between gap-2 py-1 px-3.5 rounded-full text-xs font-semibold transition-all select-none border min-h-[34px]",
+                                  expandedMangaExport[tracker.id]
+                                    ? (isLight
+                                        ? "bg-emerald-500/20 border-emerald-600/40 text-emerald-950 shadow-inner"
+                                        : "bg-emerald-500/20 border-emerald-400/50 text-emerald-200 shadow-[0_0_15px_rgba(16,185,129,0.3)]")
+                                    : (isLight
+                                        ? "bg-emerald-500/10 border-emerald-600/25 text-emerald-900 hover:bg-emerald-500/15 shadow-sm"
+                                        : "staros-glass-pill border-emerald-500/30 text-emerald-300 hover:border-emerald-400/50 shadow-[0_0_12px_rgba(16,185,129,0.2)]")
+                                )}>
+                                  {/* Left: Indicator & Quick Info */}
+                                  <div className="flex items-center gap-1.5 shrink-0">
+                                    <FileText className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                    <span className="text-[11px] font-bold tracking-wide">
+                                      {generatingPdf?.id === tracker.id
+                                        ? (generatingPdf.engine === 'pdflib' ? 'Compilando pdf-lib...' : 'Compilando img2pdf...')
+                                        : generatingExport?.id === tracker.id
+                                        ? 'Generando Archivo...'
+                                        : 'Exportar Manga'}
                                     </span>
-                                  </motion.button>
+                                  </div>
 
-                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
+                                  {/* Middle: Expanded Export Options (pdf-lib, img2pdf, ZIP, CBZ) */}
+                                  {expandedMangaExport[tracker.id] && (
+                                    <div className="flex items-center gap-1.5 pl-2 border-l border-emerald-500/30">
+                                      {/* Modo 1: pdf-lib */}
+                                      <motion.button
+                                        id={`export-pdflib-${tracker.id}`}
+                                        onClick={() => handleExportPdf(tracker, 'pdflib')}
+                                        disabled={generatingPdf?.id === tracker.id}
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.94 }}
+                                        transition={starosSpring}
+                                        className={cn(
+                                          "flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer select-none",
+                                          generatingPdf?.id === tracker.id && generatingPdf.engine === 'pdflib'
+                                            ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_12px_rgba(16,185,129,0.5)] animate-pulse"
+                                            : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                        )}
+                                        title={t('pdfLibDescription')}
+                                      >
+                                        <span>pdf-lib</span>
+                                      </motion.button>
 
-                                  {/* Modo 2: img2pdf */}
-                                  <motion.button
-                                    id={`export-img2pdf-${tracker.id}`}
-                                    onClick={() => handleExportPdf(tracker, 'img2pdf')}
-                                    disabled={generatingPdf?.id === tracker.id}
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.94 }}
-                                    transition={starosSpring}
-                                    className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
-                                      generatingPdf?.id === tracker.id && generatingPdf.engine === 'img2pdf'
-                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
-                                        : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                    )}
-                                    title={t('img2PdfDescription')}
+                                      <div className="w-px h-3 bg-white/15" />
+
+                                      {/* Modo 2: img2pdf */}
+                                      <motion.button
+                                        id={`export-img2pdf-${tracker.id}`}
+                                        onClick={() => handleExportPdf(tracker, 'img2pdf')}
+                                        disabled={generatingPdf?.id === tracker.id}
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.94 }}
+                                        transition={starosSpring}
+                                        className={cn(
+                                          "flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer select-none",
+                                          generatingPdf?.id === tracker.id && generatingPdf.engine === 'img2pdf'
+                                            ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_12px_rgba(16,185,129,0.5)] animate-pulse"
+                                            : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                        )}
+                                        title={t('img2PdfDescription')}
+                                      >
+                                        <span>img2pdf</span>
+                                      </motion.button>
+
+                                      <div className="w-px h-3 bg-white/15" />
+
+                                      {/* ZIP */}
+                                      <motion.button
+                                        id={`export-zip-${tracker.id}`}
+                                        onClick={() => handleExportImagePackage(tracker, 'original', 'zip')}
+                                        disabled={generatingExport?.id === tracker.id}
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.94 }}
+                                        transition={starosSpring}
+                                        className={cn(
+                                          "flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer select-none",
+                                          generatingExport?.id === tracker.id && generatingExport.type === 'zip_original'
+                                            ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_12px_rgba(16,185,129,0.5)] animate-pulse"
+                                            : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                        )}
+                                        title={t('exportImageZip')}
+                                      >
+                                        <span>ZIP</span>
+                                      </motion.button>
+
+                                      <div className="w-px h-3 bg-white/15" />
+
+                                      {/* CBZ */}
+                                      <motion.button
+                                        id={`export-cbz-${tracker.id}`}
+                                        onClick={() => handleExportImagePackage(tracker, 'original', 'cbz')}
+                                        disabled={generatingExport?.id === tracker.id}
+                                        whileHover={{ scale: 1.05 }}
+                                        whileTap={{ scale: 0.94 }}
+                                        transition={starosSpring}
+                                        className={cn(
+                                          "flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold transition-all cursor-pointer select-none",
+                                          generatingExport?.id === tracker.id && generatingExport.type === 'cbz_original'
+                                            ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_12px_rgba(16,185,129,0.5)] animate-pulse"
+                                            : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                        )}
+                                        title={t('exportImageCbz')}
+                                      >
+                                        <span>CBZ</span>
+                                      </motion.button>
+                                    </div>
+                                  )}
+
+                                  {/* Right: Desplegar y Minimizar Icon Button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleMangaExport(tracker.id)}
+                                    className="flex items-center gap-1 text-[11px] font-medium pl-1.5 border-l border-emerald-500/25 hover:text-white text-emerald-300 transition-colors cursor-pointer ml-auto shrink-0"
+                                    title={expandedMangaExport[tracker.id] ? t('collapse') : t('expand')}
                                   >
-                                    <Layers className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span>
-                                      {generatingPdf?.id === tracker.id && generatingPdf.engine === 'img2pdf' 
-                                        ? t('generatingImg2Pdf') 
-                                        : t('exportPdfImg2Pdf')}
+                                    <span className="hidden sm:inline">
+                                      {expandedMangaExport[tracker.id] ? 'Minimizar' : 'Desplegar'}
                                     </span>
-                                  </motion.button>
-
-                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
-
-                                  {/* ZIP */}
-                                  <motion.button
-                                    id={`export-zip-${tracker.id}`}
-                                    onClick={() => handleExportImagePackage(tracker, 'original', 'zip')}
-                                    disabled={generatingExport?.id === tracker.id}
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.94 }}
-                                    transition={starosSpring}
-                                    className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
-                                      generatingExport?.id === tracker.id && generatingExport.type === 'zip_original'
-                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
-                                        : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
+                                    {expandedMangaExport[tracker.id] ? (
+                                      <ChevronUp className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                    ) : (
+                                      <ChevronDown className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                                     )}
-                                    title={t('exportImageZip')}
-                                  >
-                                    <Archive className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span>ZIP</span>
-                                  </motion.button>
-
-                                  <div className="w-px h-4 bg-white/15 mx-0.5" />
-
-                                  {/* CBZ */}
-                                  <motion.button
-                                    id={`export-cbz-${tracker.id}`}
-                                    onClick={() => handleExportImagePackage(tracker, 'original', 'cbz')}
-                                    disabled={generatingExport?.id === tracker.id}
-                                    whileHover={{ scale: 1.05 }}
-                                    whileTap={{ scale: 0.94 }}
-                                    transition={starosSpring}
-                                    className={cn(
-                                      "flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-semibold transition-all cursor-pointer select-none",
-                                      generatingExport?.id === tracker.id && generatingExport.type === 'cbz_original'
-                                        ? "bg-emerald-400 text-neutral-950 font-bold shadow-[0_0_15px_rgba(16,185,129,0.5)] animate-pulse"
-                                        : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                    )}
-                                    title={t('exportImageCbz')}
-                                  >
-                                    <BookOpen className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span>CBZ</span>
-                                  </motion.button>
+                                  </button>
                                 </div>
                               )}
 
@@ -2713,9 +3020,11 @@ export default function DashboardClient() {
                           <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                             {/* Primeros a la vez */}
                             <div className="p-3.5 rounded-2xl staros-glass-card space-y-2">
-                              <div className="text-[11px] font-medium text-neutral-400 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
-                                <span>{t('firstN')} {t('atOnce')}:</span>
+                              <div className="text-[11px] font-medium text-neutral-400 flex items-center justify-between">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 inline-block shadow-[0_0_6px_rgba(16,185,129,0.8)]" />
+                                  <span>{t('firstN')} {t('atOnce')}:</span>
+                                </div>
                               </div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 {[10, 20, 30, 40, 50].map((qty) => (
@@ -2727,18 +3036,40 @@ export default function DashboardClient() {
                                     whileTap={{ scale: 0.92 }}
                                     transition={starosSpring}
                                     className="px-2.5 py-1 rounded-full text-xs font-mono staros-glass-pill text-neutral-300 hover:text-emerald-300 hover:border-emerald-400/50 transition-all cursor-pointer select-none"
+                                    title={`Seleccionar primeros ${qty} capítulos`}
                                   >
                                     {qty}
                                   </motion.button>
                                 ))}
                               </div>
+                              <div className="pt-1">
+                                <motion.button
+                                  type="button"
+                                  onClick={() => {
+                                    const selCount = Object.values(selectedChapters[tracker.id] || {}).filter(Boolean).length;
+                                    const qty = selCount > 0 ? selCount : 10;
+                                    handleDownloadBatchToSinglePdf(tracker, qty, 'first');
+                                  }}
+                                  disabled={isBatchDownloading[tracker.id] || generatingPdf?.id === tracker.id}
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.96 }}
+                                  transition={starosSpring}
+                                  className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-400/40 shadow-[0_0_12px_rgba(16,185,129,0.2)] transition-all cursor-pointer select-none"
+                                  title="Descargar y compilar los primeros capítulos en 1 solo PDF (pdf-lib ➜ img2pdf)"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-emerald-400" />
+                                  <span>⚡ Descargar 1 Solo PDF (Primeros)</span>
+                                </motion.button>
+                              </div>
                             </div>
 
                             {/* Últimos a la vez */}
                             <div className="p-3.5 rounded-2xl staros-glass-card space-y-2">
-                              <div className="text-[11px] font-medium text-neutral-400 flex items-center gap-1.5">
-                                <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block shadow-[0_0_6px_rgba(59,130,246,0.8)]" />
-                                <span>{t('lastN')} {t('atOnce')}:</span>
+                              <div className="text-[11px] font-medium text-neutral-400 flex items-center justify-between">
+                                <div className="flex items-center gap-1.5">
+                                  <span className="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block shadow-[0_0_6px_rgba(59,130,246,0.8)]" />
+                                  <span>{t('lastN')} {t('atOnce')}:</span>
+                                </div>
                               </div>
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 {[10, 20, 30, 40, 50].map((qty) => (
@@ -2750,10 +3081,30 @@ export default function DashboardClient() {
                                     whileTap={{ scale: 0.92 }}
                                     transition={starosSpring}
                                     className="px-2.5 py-1 rounded-full text-xs font-mono staros-glass-pill text-neutral-300 hover:text-blue-300 hover:border-blue-400/50 transition-all cursor-pointer select-none"
+                                    title={`Seleccionar últimos ${qty} capítulos`}
                                   >
                                     {qty}
                                   </motion.button>
                                 ))}
+                              </div>
+                              <div className="pt-1">
+                                <motion.button
+                                  type="button"
+                                  onClick={() => {
+                                    const selCount = Object.values(selectedChapters[tracker.id] || {}).filter(Boolean).length;
+                                    const qty = selCount > 0 ? selCount : 10;
+                                    handleDownloadBatchToSinglePdf(tracker, qty, 'last');
+                                  }}
+                                  disabled={isBatchDownloading[tracker.id] || generatingPdf?.id === tracker.id}
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.96 }}
+                                  transition={starosSpring}
+                                  className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold bg-blue-500/20 hover:bg-blue-500/30 text-blue-300 border border-blue-400/40 shadow-[0_0_12px_rgba(59,130,246,0.2)] transition-all cursor-pointer select-none"
+                                  title="Descargar y compilar los últimos capítulos en 1 solo PDF (pdf-lib ➜ img2pdf)"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-blue-400" />
+                                  <span>⚡ Descargar 1 Solo PDF (Últimos)</span>
+                                </motion.button>
                               </div>
                             </div>
 
@@ -2823,6 +3174,25 @@ export default function DashboardClient() {
                                   {t('apply')}
                                 </motion.button>
                               </div>
+                              <div className="pt-1">
+                                <motion.button
+                                  type="button"
+                                  onClick={() => {
+                                    const qty = parseInt(customQty[tracker.id] ?? '15', 10) || 15;
+                                    const dir = customDir[tracker.id] ?? 'first';
+                                    handleDownloadBatchToSinglePdf(tracker, qty, dir);
+                                  }}
+                                  disabled={isBatchDownloading[tracker.id] || generatingPdf?.id === tracker.id}
+                                  whileHover={{ scale: 1.02 }}
+                                  whileTap={{ scale: 0.96 }}
+                                  transition={starosSpring}
+                                  className="w-full flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-bold bg-purple-500/20 hover:bg-purple-500/30 text-purple-300 border border-purple-400/40 shadow-[0_0_12px_rgba(192,132,252,0.2)] transition-all cursor-pointer select-none"
+                                  title="Descargar y compilar en 1 solo PDF (pdf-lib ➜ img2pdf)"
+                                >
+                                  <FileText className="w-3.5 h-3.5 text-purple-400" />
+                                  <span>⚡ Descargar Cantidad a 1 Solo PDF</span>
+                                </motion.button>
+                              </div>
                             </div>
                           </div>
 
@@ -2853,87 +3223,52 @@ export default function DashboardClient() {
                               </span>
                             </motion.button>
 
-                            {/* 2. Combined Volume PDF (pdf-lib) */}
+                            {/* 2. Combined Volume PDF (pdf-lib ➜ img2pdf fallback) */}
                             <motion.button
                               type="button"
-                              onClick={() => handleExportSelectedCombined(tracker, 'pdflib')}
+                              onClick={() => handleExportSelectedCombined(tracker)}
                               disabled={generatingPdf?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
                               whileHover={{ scale: 1.04 }}
                               whileTap={{ scale: 0.95 }}
                               transition={starosSpring}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-bold staros-glass-pill bg-emerald-500/20 text-emerald-300 border border-emerald-400/50 hover:bg-emerald-500/30 hover:text-white shadow-[0_0_15px_rgba(16,185,129,0.25)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+                              title="Compilar capítulos seleccionados en 1 solo documento PDF con pdf-lib (respaldo img2pdf)"
                             >
                               <FileText className="w-4 h-4 text-emerald-400" />
-                              <span>{t('exportSelectedPdfLib')}</span>
+                              <span>⚡ 1 Solo PDF (pdf-lib ➜ img2pdf)</span>
                             </motion.button>
 
-                            {/* 3. Combined Volume PDF (img2pdf) */}
+                            {/* 3. Export Selected as ZIP Bundle with individual chapter PDFs */}
                             <motion.button
                               type="button"
-                              onClick={() => handleExportSelectedCombined(tracker, 'img2pdf')}
-                              disabled={generatingPdf?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
-                              whileHover={{ scale: 1.04 }}
-                              whileTap={{ scale: 0.95 }}
-                              transition={starosSpring}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
-                            >
-                              <Layers className="w-4 h-4 text-emerald-400" />
-                              <span>{t('exportSelectedImg2Pdf')}</span>
-                            </motion.button>
-
-                            {/* 4. Export Selected as ZIP Bundle */}
-                            <motion.button
-                              type="button"
-                              onClick={async () => {
-                                const trackerSel = selectedChapters[tracker.id] || {};
-                                const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id]);
-                                const combinedImages: string[] = [];
-                                selectedChapterList.forEach(ch => {
-                                  if (ch.images) combinedImages.push(...ch.images);
-                                });
-                                if (combinedImages.length === 0) {
-                                  showToast('No hay páginas descargadas en los capítulos seleccionados');
-                                  return;
-                                }
-                                await handleExportImagePackage(tracker, 'original', 'zip', combinedImages, `${tracker.title || 'manga'}_seleccion_zip`);
-                              }}
+                              onClick={() => handleExportSelectedZipPdfs(tracker)}
                               disabled={generatingExport?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
                               whileHover={{ scale: 1.04 }}
                               whileTap={{ scale: 0.95 }}
                               transition={starosSpring}
                               className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+                              title="Descargar todos los capítulos seleccionados dentro de un ZIP con los PDFs de cada capítulo"
                             >
                               <Archive className="w-4 h-4 text-emerald-400" />
-                              <span>ZIP Selección</span>
+                              <span>ZIP-Selección (PDFs)</span>
                             </motion.button>
 
-                            {/* 5. Export Selected as CBZ Comic Bundle */}
+                            {/* 4. Export Selected as individual CBZ comic files */}
                             <motion.button
                               type="button"
-                              onClick={async () => {
-                                const trackerSel = selectedChapters[tracker.id] || {};
-                                const selectedChapterList = (tracker.chapters || []).filter(ch => trackerSel[ch.id]);
-                                const combinedImages: string[] = [];
-                                selectedChapterList.forEach(ch => {
-                                  if (ch.images) combinedImages.push(...ch.images);
-                                });
-                                if (combinedImages.length === 0) {
-                                  showToast('No hay páginas descargadas en los capítulos seleccionados');
-                                  return;
-                                }
-                                await handleExportImagePackage(tracker, 'original', 'cbz', combinedImages, `${tracker.title || 'manga'}_seleccion_cbz`);
-                              }}
+                              onClick={() => handleExportSelectedIndividualCbz(tracker)}
                               disabled={generatingExport?.id === tracker.id || !Object.values(selectedChapters[tracker.id] || {}).some(Boolean)}
                               whileHover={{ scale: 1.04 }}
                               whileTap={{ scale: 0.95 }}
                               transition={starosSpring}
                               className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-white border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+                              title="Descargar los capítulos seleccionados en archivos .cbz individuales para cada capítulo"
                             >
                               <BookOpen className="w-4 h-4 text-emerald-400" />
-                              <span>CBZ Selección</span>
+                              <span>CBZ-Selección (Individual)</span>
                             </motion.button>
 
-                            {/* 6. Individual Separate Chapter PDFs */}
+                            {/* 5. Individual Separate Chapter PDFs */}
                             <motion.button
                               type="button"
                               onClick={() => handleExportSelectedIndividual(tracker, 'img2pdf')}
@@ -2941,14 +3276,14 @@ export default function DashboardClient() {
                               whileHover={{ scale: 1.04 }}
                               whileTap={{ scale: 0.95 }}
                               transition={starosSpring}
-                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-emerald-300 border border-emerald-400/40 hover:border-emerald-400/60 shadow-[0_0_12px_rgba(16,185,129,0.2)] transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
+                              className="flex items-center gap-2 px-3.5 py-2 rounded-full text-xs font-semibold staros-glass-pill text-neutral-300 border border-white/15 hover:border-emerald-400/40 hover:text-emerald-300 transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed select-none"
                               title={t('exportIndividualPdfs')}
                             >
                               <FolderDown className="w-4 h-4 text-emerald-400" />
                               <span>{t('exportIndividualPdfs')}</span>
                             </motion.button>
 
-                            {/* 7. Reintentar Rotos en Sub-panel */}
+                            {/* 6. Reintentar Rotos en Sub-panel */}
                             {((tracker.chapters || []).some(c => c.status === 'error' || ((!c.images || c.images.length === 0) && c.status !== 'downloading' && c.status !== 'pending' && tracker.status === 'completed'))) && (
                               <motion.button
                                 type="button"
@@ -3172,126 +3507,64 @@ export default function DashboardClient() {
 
                                           {/* Chapter Specific Actions / Capsules */}
                                           <div className="flex items-center gap-2.5 w-full sm:w-auto sm:ml-auto">
-                                            {/* A. CATEGORÍA MANGA: Opciones pdf-lib, img2pdf, zip, cbz + icono desplegar/minimizar integrado */}
+                                            {/* A. CATEGORÍA MANGA: CÁPSULA ÚNICA LARGA Y DELGADA CON ICONO DE DESPLEGAR Y MINIMIZAR INTEGRADO */}
                                             {isChapterManga && (
-                                              <>
+                                              <div className={cn(
+                                                "w-full sm:w-auto sm:min-w-[280px] flex items-center justify-between gap-3 py-1.5 px-4 rounded-full text-xs font-semibold transition-all select-none border",
+                                                isCollapsed
+                                                  ? (isLight
+                                                      ? "bg-emerald-500/10 border-emerald-600/25 text-emerald-900 hover:bg-emerald-500/20 shadow-sm"
+                                                      : "staros-glass-pill border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 hover:border-emerald-400/50 shadow-[0_0_12px_rgba(16,185,129,0.2)]")
+                                                  : (isLight
+                                                      ? "bg-emerald-500/20 border-emerald-600/40 text-emerald-950 shadow-inner"
+                                                      : "bg-emerald-500/25 border-emerald-400/50 text-emerald-200 shadow-[0_0_15px_rgba(16,185,129,0.3)]")
+                                              )}>
+                                                {/* Left: Quick Chapter PDF button or Book icon */}
                                                 {chapterImages.length > 0 ? (
-                                                  <div className="inline-flex items-center rounded-full bg-emerald-950/40 p-0.5 border border-emerald-500/30 shadow-[0_0_12px_rgba(16,185,129,0.2)]">
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => handleExportPdf(
-                                                        tracker, 
-                                                        'pdflib', 
-                                                        chapterImages, 
-                                                        `${tracker.title || 'manga'}_${chapter.name}`,
-                                                        chapter.id
-                                                      )}
-                                                      disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
-                                                      className={cn(
-                                                        "flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer",
-                                                        generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id && generatingPdf.engine === 'pdflib'
-                                                          ? "bg-emerald-500 text-black font-bold animate-pulse"
-                                                          : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                                      )}
-                                                      title="PDF Vector Stream"
-                                                    >
-                                                      <FileText className="w-3 h-3 text-emerald-400" />
-                                                      <span>pdf-lib</span>
-                                                    </button>
-                                                    <div className="w-px h-3 bg-emerald-500/20" />
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => handleExportPdf(
-                                                        tracker, 
-                                                        'img2pdf', 
-                                                        chapterImages, 
-                                                        `${tracker.title || 'manga'}_${chapter.name}`,
-                                                        chapter.id
-                                                      )}
-                                                      disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
-                                                      className={cn(
-                                                        "flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all cursor-pointer",
-                                                        generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id && generatingPdf.engine === 'img2pdf'
-                                                          ? "bg-emerald-400 text-black font-bold animate-pulse"
-                                                          : "text-emerald-300 hover:bg-emerald-500/20 hover:text-white"
-                                                      )}
-                                                      title="PDF 1:1 Image Package"
-                                                    >
-                                                      <Layers className="w-3 h-3 text-emerald-400" />
-                                                      <span>img2pdf</span>
-                                                    </button>
-                                                    <div className="w-px h-3 bg-emerald-500/20" />
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => handleExportImagePackage(
-                                                        tracker,
-                                                        'original',
-                                                        'zip',
-                                                        chapterImages,
-                                                        `${tracker.title || 'manga'}_${chapter.name}`,
-                                                        chapter.id
-                                                      )}
-                                                      disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
-                                                      className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
-                                                      title="ZIP HD Original"
-                                                    >
-                                                      <Archive className="w-3 h-3 text-emerald-400" />
-                                                      <span>ZIP</span>
-                                                    </button>
-                                                    <div className="w-px h-3 bg-emerald-500/20" />
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => handleExportImagePackage(
-                                                        tracker,
-                                                        'original',
-                                                        'cbz',
-                                                        chapterImages,
-                                                        `${tracker.title || 'manga'}_${chapter.name}`,
-                                                        chapter.id
-                                                      )}
-                                                      disabled={generatingExport?.id === tracker.id && generatingExport?.chapterId === chapter.id}
-                                                      className="flex items-center gap-1 px-2 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
-                                                      title="CBZ Lector de Comic"
-                                                    >
-                                                      <BookOpen className="w-3 h-3 text-emerald-400" />
-                                                      <span>CBZ</span>
-                                                    </button>
-                                                    <div className="w-px h-3 bg-emerald-500/20" />
-                                                    <button
-                                                      type="button"
-                                                      onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
-                                                      className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium text-emerald-300 hover:bg-emerald-500/20 hover:text-white transition-all cursor-pointer"
-                                                      title={isCollapsed ? t('expand') : t('collapse')}
-                                                    >
-                                                      <span className="hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
-                                                      {isCollapsed ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronUp className="w-3.5 h-3.5" />}
-                                                    </button>
-                                                  </div>
-                                                ) : (
-                                                  <motion.button
+                                                  <button
                                                     type="button"
-                                                    onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
-                                                    whileHover={{ scale: 1.01 }}
-                                                    whileTap={{ scale: 0.98 }}
-                                                    transition={starosSpring}
-                                                    className={cn(
-                                                      "w-full sm:w-auto sm:min-w-[240px] flex items-center justify-between gap-3 py-1.5 px-4 rounded-full text-xs font-semibold transition-all cursor-pointer select-none border",
-                                                      isCollapsed
-                                                        ? "staros-glass-pill border-emerald-500/30 text-emerald-300 hover:bg-emerald-500/20 hover:border-emerald-400/50 shadow-[0_0_12px_rgba(16,185,129,0.2)]"
-                                                        : "bg-emerald-500/20 border-emerald-400/50 text-emerald-200 shadow-[0_0_15px_rgba(16,185,129,0.3)]"
-                                                    )}
+                                                    onClick={(e) => {
+                                                      e.stopPropagation();
+                                                      handleExportPdf(
+                                                        tracker,
+                                                        'pdflib',
+                                                        chapterImages,
+                                                        `${tracker.title || 'manga'}_${chapter.name}`,
+                                                        chapter.id
+                                                      );
+                                                    }}
+                                                    disabled={generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id}
+                                                    className="flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-[11px] font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 hover:text-white border border-emerald-400/40 transition-all cursor-pointer shadow-sm"
+                                                    title="Descargar PDF (pdf-lib ➜ img2pdf)"
                                                   >
-                                                    <div className="flex items-center gap-2 min-w-0">
-                                                      <BookOpen className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                                                      <span className="truncate">{isCollapsed ? 'Desplegar Capítulo' : 'Minimizar Capítulo'}</span>
-                                                    </div>
-                                                    <div className="flex items-center gap-1 shrink-0 text-xs font-medium pl-2 border-l border-emerald-500/20">
-                                                      <span className="text-[11px] hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
-                                                      {isCollapsed ? <ChevronDown className="w-4 h-4 text-emerald-400" /> : <ChevronUp className="w-4 h-4 text-emerald-400" />}
-                                                    </div>
-                                                  </motion.button>
+                                                    <FileText className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                                    <span>{generatingPdf?.id === tracker.id && generatingPdf?.chapterId === chapter.id ? 'Compilando...' : 'Descargar PDF'}</span>
+                                                  </button>
+                                                ) : (
+                                                  <div className="flex items-center gap-1.5 text-neutral-400 text-[11px]">
+                                                    <BookOpen className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                                    <span>Capítulo Manga</span>
+                                                  </div>
                                                 )}
-                                              </>
+
+                                                {/* Center: Pages count */}
+                                                {chapterImages.length > 0 && (
+                                                  <span className="text-[11px] font-mono text-emerald-300/80 hidden sm:inline">
+                                                    {chapterImages.length} págs
+                                                  </span>
+                                                )}
+
+                                                {/* Right: Desplegar y Minimizar */}
+                                                <button
+                                                  type="button"
+                                                  onClick={() => toggleChapterCollapse(tracker.id, chapter.id)}
+                                                  className="flex items-center gap-1.5 text-xs font-medium pl-2 border-l border-emerald-500/25 hover:text-white transition-colors cursor-pointer ml-auto"
+                                                  title={isCollapsed ? t('expand') : t('collapse')}
+                                                >
+                                                  <span className="text-[11px] hidden sm:inline">{isCollapsed ? 'Desplegar' : 'Minimizar'}</span>
+                                                  {isCollapsed ? <ChevronDown className="w-4 h-4 text-emerald-400" /> : <ChevronUp className="w-4 h-4 text-emerald-400" />}
+                                                </button>
+                                              </div>
                                             )}
 
                                             {/* B. CATEGORÍA VIDEO: CÁPSULA ÚNICA LARGA Y DELGADA CON ICONO DE DESPLEGAR Y MINIMIZAR */}
