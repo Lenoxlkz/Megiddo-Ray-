@@ -1,4 +1,4 @@
-export type TrackingMode = 'single' | 'sequential' | 'continuous';
+  export type TrackingMode = 'single' | 'sequential' | 'continuous';
 export type TrackingStatus = 'idle' | 'running' | 'paused' | 'completed' | 'error' | 'stopped';
 export type SearchCategory = 'manga' | 'video' | 'image' | 'nsfw';
 
