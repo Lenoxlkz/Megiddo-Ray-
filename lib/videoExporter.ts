@@ -11,15 +11,48 @@ export interface VideoExportOptions {
   onProgress?: (percent: number, status: string) => void;
 }
 
+export function isPwaOrStandalone(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    window.matchMedia('(display-mode: standalone)').matches ||
+    (window.navigator as unknown as { standalone?: boolean }).standalone === true ||
+    document.referrer.includes('android-app://')
+  );
+}
+
+function triggerDirectUrlDownload(url: string, filename: string) {
+  if (typeof window === 'undefined') return;
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
+  document.body.appendChild(link);
+  link.click();
+  setTimeout(() => {
+    if (document.body.contains(link)) {
+      document.body.removeChild(link);
+    }
+  }, 3000);
+}
+
 function triggerDownload(blob: Blob, filename: string) {
+  if (typeof window === 'undefined') return;
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url;
   link.download = filename;
+  link.target = '_blank';
+  link.rel = 'noopener noreferrer';
   document.body.appendChild(link);
   link.click();
-  document.body.removeChild(link);
-  setTimeout(() => URL.revokeObjectURL(url), 4000);
+  setTimeout(() => {
+    if (document.body.contains(link)) {
+      document.body.removeChild(link);
+    }
+  }, 2000);
+  // Keep object URL alive long enough for mobile download managers to finish spooling
+  setTimeout(() => URL.revokeObjectURL(url), 120000);
 }
 
 /**
@@ -157,8 +190,33 @@ export async function exportVideo(options: VideoExportOptions): Promise<boolean>
   }
 
   // 3. Fallback: try image synthesis if videoUrl failed but imageUrl exists
-  if (imageUrl) {
+  if (imageUrl && !videoUrl) {
     return exportImageWithAudioAsVideo({ imageUrl, audioUrl, title, onProgress });
+  }
+
+  // 4. Resilient Fallback for PWA / Mobile WebViews / Vercel Payload Limits:
+  // When fetch/blob fails due to mobile memory limits or Vercel payload limit (4.5MB),
+  // trigger native download via direct anchor to proxy or direct URL with attachment header.
+  try {
+    const proxyUrl = `/api/proxy-video?url=${encodeURIComponent(targetUrl)}&filename=${encodeURIComponent(filename)}`;
+    if (onProgress) onProgress(85, 'Iniciando descarga en navegador...');
+    triggerDirectUrlDownload(proxyUrl, filename);
+    if (onProgress) onProgress(100, 'Descarga iniciada');
+    return true;
+  } catch (proxyFallbackErr) {
+    console.warn('Native proxy trigger failed, trying direct target URL:', proxyFallbackErr);
+  }
+
+  // 5. Direct URL fallback (CDN stream)
+  if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+    try {
+      if (onProgress) onProgress(90, 'Descargando desde enlace de origen...');
+      triggerDirectUrlDownload(targetUrl, filename);
+      if (onProgress) onProgress(100, 'Descarga iniciada');
+      return true;
+    } catch (e) {
+      console.warn('Direct URL trigger failed:', e);
+    }
   }
 
   if (onProgress) onProgress(0, 'Error: No se pudo descargar el flujo binario');
@@ -245,6 +303,19 @@ export async function exportAudioMp3(options: VideoExportOptions): Promise<boole
     }
   } catch {
     // Fallback failure
+  }
+
+  // 3. Fallback for PWA/Vercel: trigger direct download of audio or media stream
+  if (targetUrl.startsWith('http://') || targetUrl.startsWith('https://')) {
+    try {
+      if (onProgress) onProgress(85, 'Iniciando descarga en navegador...');
+      const proxyAudioUrl = `/api/proxy-video?url=${encodeURIComponent(targetUrl)}&audio=true&filename=${encodeURIComponent(filename)}`;
+      triggerDirectUrlDownload(proxyAudioUrl, filename);
+      if (onProgress) onProgress(100, 'Descarga de audio iniciada');
+      return true;
+    } catch {
+      // Fallback
+    }
   }
 
   if (onProgress) onProgress(0, 'Error: No se pudo extraer la pista de audio MP3');
