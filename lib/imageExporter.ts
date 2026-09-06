@@ -199,3 +199,86 @@ export async function exportImagesPackage(options: ImageExportOptions): Promise<
   triggerDownload(zipBlob, finalFilename);
   return true;
 }
+
+/**
+ * Requirement 3: CBZ Selección - Export each selected chapter as an individual separate CBZ file.
+ * Respects sequential mode (1 by 1) vs simultaneous mode (parallel downloads).
+ */
+export async function exportSelectedChaptersIndividualCbz(
+  trackerTitle: string,
+  chapters: Array<{ id?: string | number; name?: string; images?: string[] }>,
+  isSequential = false,
+  onProgress?: (percent: number, current: number, total: number) => void
+): Promise<boolean> {
+  const validChapters = chapters.filter(ch => ch.images && ch.images.length > 0);
+  if (validChapters.length === 0) {
+    throw new Error('No hay capítulos con imágenes disponibles para exportar');
+  }
+
+  const { default: JSZip } = await import('jszip');
+  const total = validChapters.length;
+  let completed = 0;
+
+  const processChapter = async (ch: { id?: string | number; name?: string; images?: string[] }, idx: number) => {
+    const zip = new JSZip();
+    const images = ch.images || [];
+    const chTotal = images.length;
+    
+    // Batch fetch chapter images
+    const batchSize = 6;
+    for (let i = 0; i < images.length; i += batchSize) {
+      const chunk = images.slice(i, i + batchSize);
+      await Promise.all(
+        chunk.map(async (imgUrl, chunkIndex) => {
+          const globalIndex = i + chunkIndex;
+          const result = await fetchImageBlob(imgUrl);
+          if (result) {
+            const padLength = Math.max(3, String(chTotal).length);
+            const filename = `page_${String(globalIndex + 1).padStart(padLength, '0')}.${result.ext}`;
+            zip.file(filename, result.blob);
+          }
+        })
+      );
+    }
+
+    const zipBlob = await zip.generateAsync({ type: 'blob', compression: 'STORE' });
+    const safeTitle = (trackerTitle || 'Manga').replace(/[/\\?%*:|"<>]/g, '_').trim();
+    const safeChName = (ch.name || `Capitulo_${idx + 1}`).replace(/[/\\?%*:|"<>]/g, '_').trim();
+    const filename = `${safeTitle}_${safeChName}.cbz`;
+
+    triggerDownload(zipBlob, filename);
+    completed++;
+    if (onProgress) {
+      onProgress(Math.round((completed / total) * 100), completed, total);
+    }
+  };
+
+  if (isSequential) {
+    for (let i = 0; i < validChapters.length; i++) {
+      await processChapter(validChapters[i], i);
+      await new Promise(r => setTimeout(r, 250));
+    }
+  } else {
+    // Mode Simultaneous: parallel workers
+    const CONCURRENCY = 3;
+    let curIdx = 0;
+
+    const worker = async () => {
+      while (curIdx < validChapters.length) {
+        const idx = curIdx++;
+        if (idx >= validChapters.length) break;
+        await processChapter(validChapters[idx], idx);
+        await new Promise(r => setTimeout(r, 100));
+      }
+    };
+
+    const workers = [];
+    for (let w = 0; w < Math.min(CONCURRENCY, validChapters.length); w++) {
+      workers.push(worker());
+    }
+    await Promise.all(workers);
+  }
+
+  return true;
+}
+
